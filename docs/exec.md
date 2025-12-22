@@ -10,6 +10,13 @@ In non-interactive mode, Codex does not ask for command or edit approvals. By de
 
 Use `codex exec --full-auto` to allow file edits. Use `codex exec --sandbox danger-full-access` to allow edits and networked commands.
 
+Attach one or more images by repeating `--image` or supplying a comma-separated list:
+
+```shell
+codex exec --image diagram.png --image screenshot.jpg "Summarize these"
+codex exec --image diagram.png,screenshot.jpg "Summarize these"
+```
+
 ### Default output mode
 
 By default, Codex streams its activity to stderr and only writes the final message from the agent to stdout. This makes it easier to pipe `codex exec` into another tool without extra filtering.
