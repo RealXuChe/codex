@@ -83,6 +83,7 @@ use tracing::error;
 
 type JsonValue = serde_json::Value;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_bespoke_event_handling(
     event: Event,
     conversation_id: ConversationId,
