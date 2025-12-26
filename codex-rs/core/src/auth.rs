@@ -103,6 +103,35 @@ impl From<RefreshTokenError> for std::io::Error {
 }
 
 impl CodexAuth {
+    /// Create a new `CodexAuth` instance that shares this auth's storage and HTTP client,
+    /// but uses the provided ChatGPT token payload as its "current" auth.json.
+    ///
+    /// This is useful for operations like `/status` that need to query usage for
+    /// multiple stored credentials without changing the process-wide active credential.
+    pub fn with_chatgpt_token_data(
+        &self,
+        tokens: TokenData,
+        last_refresh: Option<chrono::DateTime<Utc>>,
+    ) -> Option<Self> {
+        if self.mode != AuthMode::ChatGPT {
+            return None;
+        }
+
+        let auth_dot_json = AuthDotJson {
+            openai_api_key: None,
+            tokens: Some(tokens),
+            last_refresh,
+            credentials: None,
+        };
+        Some(Self {
+            mode: AuthMode::ChatGPT,
+            api_key: None,
+            auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
+            storage: Arc::clone(&self.storage),
+            client: self.client.clone(),
+        })
+    }
+
     pub async fn refresh_token(&self) -> Result<String, RefreshTokenError> {
         tracing::info!("Refreshing token");
 
@@ -1534,5 +1563,102 @@ impl AuthManager {
             prev,
             CredentialKnownStatus::Unknown | CredentialKnownStatus::Available
         )
+    }
+
+    pub fn rename_chatgpt_credential(&self, id: u32, name: Option<String>) -> std::io::Result<()> {
+        let Some(mut auth_dot_json) =
+            load_auth_dot_json(&self.codex_home, self.auth_credentials_store_mode)?
+        else {
+            return Err(std::io::Error::other("Not logged in."));
+        };
+
+        let mut store = match auth_dot_json.credentials.take() {
+            Some(store) => store,
+            None => {
+                let Some(tokens) = auth_dot_json.tokens.take() else {
+                    return Err(std::io::Error::other("No ChatGPT credentials found."));
+                };
+                let entry = CredentialEntryDotJson {
+                    id: 1,
+                    name: None,
+                    tokens,
+                    last_refresh: auth_dot_json.last_refresh.take(),
+                };
+                CredentialsDotJson {
+                    entries: vec![entry],
+                }
+            }
+        };
+
+        let Some(entry) = store.entries.iter_mut().find(|entry| entry.id == id) else {
+            return Err(std::io::Error::other(format!(
+                "Unknown credential id: {id}"
+            )));
+        };
+        entry.name = name.filter(|s| !s.trim().is_empty());
+
+        auth_dot_json.credentials = Some(store);
+        auth_dot_json.tokens = None;
+        auth_dot_json.last_refresh = None;
+        save_auth(
+            &self.codex_home,
+            &auth_dot_json,
+            self.auth_credentials_store_mode,
+        )?;
+        self.reload();
+        Ok(())
+    }
+
+    pub fn logout_chatgpt_credential(&self, id: u32) -> std::io::Result<()> {
+        let Some(mut auth_dot_json) =
+            load_auth_dot_json(&self.codex_home, self.auth_credentials_store_mode)?
+        else {
+            return Err(std::io::Error::other("Not logged in."));
+        };
+
+        let mut store = match auth_dot_json.credentials.take() {
+            Some(store) => store,
+            None => {
+                // Legacy single-token format.
+                if id != 1 {
+                    return Err(std::io::Error::other(format!(
+                        "Unknown credential id: {id}"
+                    )));
+                }
+                self.logout()?;
+                return Ok(());
+            }
+        };
+
+        let before = store.entries.len();
+        store.entries.retain(|entry| entry.id != id);
+        if store.entries.len() == before {
+            return Err(std::io::Error::other(format!(
+                "Unknown credential id: {id}"
+            )));
+        }
+
+        if store.entries.is_empty() {
+            self.logout()?;
+            return Ok(());
+        }
+
+        // Keep the rules simple: after deletion, re-number remaining entries 1..N.
+        store.entries.sort_by_key(|entry| entry.id);
+        for (idx, entry) in store.entries.iter_mut().enumerate() {
+            entry.id = (idx + 1) as u32;
+        }
+
+        auth_dot_json.credentials = Some(store);
+        auth_dot_json.tokens = None;
+        auth_dot_json.last_refresh = None;
+        save_auth(
+            &self.codex_home,
+            &auth_dot_json,
+            self.auth_credentials_store_mode,
+        )?;
+
+        self.reload();
+        Ok(())
     }
 }
