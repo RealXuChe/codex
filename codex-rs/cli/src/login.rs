@@ -1,10 +1,10 @@
 use codex_app_server_protocol::AuthMode;
 use codex_common::CliConfigOverrides;
+use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::auth::CLIENT_ID;
 use codex_core::auth::login_with_api_key;
-use codex_core::auth::logout;
 use codex_core::config::Config;
 use codex_login::ServerOptions;
 use codex_login::run_device_code_login;
@@ -181,22 +181,64 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
     }
 }
 
-pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
+pub async fn run_logout(cli_config_overrides: CliConfigOverrides, target: Option<String>) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
-    match logout(&config.codex_home, config.cli_auth_credentials_store_mode) {
-        Ok(true) => {
-            eprintln!("Successfully logged out");
-            std::process::exit(0);
+    let auth_manager = AuthManager::new(
+        config.codex_home.clone(),
+        true,
+        config.cli_auth_credentials_store_mode,
+    );
+    let credentials = auth_manager.list_chatgpt_credentials();
+
+    let exit_from_logout = |result: std::io::Result<bool>| -> ! {
+        match result {
+            Ok(true) => {
+                eprintln!("Successfully logged out");
+                std::process::exit(0);
+            }
+            Ok(false) => {
+                eprintln!("Not logged in");
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("Error logging out: {err}");
+                std::process::exit(1);
+            }
         }
-        Ok(false) => {
-            eprintln!("Not logged in");
-            std::process::exit(0);
+    };
+
+    // Require an id when multiple credentials exist.
+    if credentials.len() > 1 && target.is_none() {
+        eprintln!("Usage: codex logout <id> | codex logout all");
+        std::process::exit(1);
+    }
+
+    match target.as_deref() {
+        Some("all") => exit_from_logout(auth_manager.logout()),
+        Some(id_raw) => {
+            let Ok(id) = id_raw.parse::<u32>() else {
+                eprintln!("Invalid credential id: {id_raw}");
+                std::process::exit(1);
+            };
+
+            if credentials.len() <= 1 {
+                // Preserve legacy behavior: logging out the only stored credential logs out fully.
+                exit_from_logout(auth_manager.logout());
+            } else {
+                match auth_manager.logout_chatgpt_credential(id) {
+                    Ok(()) => {
+                        eprintln!("Successfully logged out credential #{id}");
+                        std::process::exit(0);
+                    }
+                    Err(err) => {
+                        eprintln!("Error logging out: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
-        Err(e) => {
-            eprintln!("Error logging out: {e}");
-            std::process::exit(1);
-        }
+        None => exit_from_logout(auth_manager.logout()),
     }
 }
 
