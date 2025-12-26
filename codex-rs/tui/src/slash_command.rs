@@ -26,6 +26,7 @@ pub enum SlashCommand {
     Mention,
     Status,
     Mcp,
+    Login,
     Logout,
     Quit,
     Exit,
@@ -56,6 +57,7 @@ impl SlashCommand {
             SlashCommand::Approvals => "choose what Codex can do without approval",
             SlashCommand::Experimental => "toggle beta features",
             SlashCommand::Mcp => "list configured MCP tools",
+            SlashCommand::Login => "log in or manage stored ChatGPT credentials",
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::TestApproval => "test approval request",
@@ -80,6 +82,7 @@ impl SlashCommand {
             | SlashCommand::Approvals
             | SlashCommand::Experimental
             | SlashCommand::Review
+            | SlashCommand::Login
             | SlashCommand::Logout => false,
             SlashCommand::Diff
             | SlashCommand::Mention

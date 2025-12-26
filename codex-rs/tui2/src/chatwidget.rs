@@ -94,6 +94,7 @@ use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
+use crate::bottom_pane::parse_positional_args;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::diff_render::display_path_for;
@@ -1500,8 +1501,8 @@ impl ChatWidget {
                         };
                         self.queue_user_message(user_message);
                     }
-                    InputResult::Command(cmd) => {
-                        self.dispatch_command(cmd);
+                    InputResult::Command { command, rest } => {
+                        self.dispatch_command(command, rest);
                     }
                     InputResult::None => {}
                 }
@@ -1524,7 +1525,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn dispatch_command(&mut self, cmd: SlashCommand) {
+    fn dispatch_command(&mut self, cmd: SlashCommand, rest: String) {
         if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
             let message = format!(
                 "'/{}' is disabled while a task is in progress.",
@@ -1576,14 +1577,198 @@ impl ChatWidget {
             SlashCommand::Quit | SlashCommand::Exit => {
                 self.request_exit();
             }
-            SlashCommand::Logout => {
-                if let Err(e) = codex_core::auth::logout(
-                    &self.config.codex_home,
-                    self.config.cli_auth_credentials_store_mode,
-                ) {
-                    tracing::error!("failed to logout: {e}");
+            SlashCommand::Login => {
+                let args = parse_positional_args(&rest);
+                if args.is_empty() {
+                    let opts = codex_login::ServerOptions::new(
+                        self.config.codex_home.clone(),
+                        codex_login::CLIENT_ID.to_string(),
+                        None,
+                        self.config.cli_auth_credentials_store_mode,
+                    );
+                    match codex_login::run_login_server(opts) {
+                        Ok(child) => {
+                            let auth_url = child.auth_url.clone();
+                            self.add_info_message(
+                                format!(
+                                    "Continue login in your browser:\n{auth_url}\n\n(After login completes, run /status to verify credentials.)"
+                                ),
+                                None,
+                            );
+
+                            let auth_manager = Arc::clone(&self.auth_manager);
+                            let app_event_tx = self.app_event_tx.clone();
+                            tokio::spawn(async move {
+                                match child.block_until_done().await {
+                                    Ok(()) => {
+                                        auth_manager.reload();
+                                        let credential_count =
+                                            auth_manager.list_chatgpt_credentials().len();
+                                        app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                            history_cell::new_info_event(
+                                                format!(
+                                                    "Login completed. Stored ChatGPT credentials: {credential_count}."
+                                                ),
+                                                None,
+                                            ),
+                                        )));
+                                    }
+                                    Err(err) => {
+                                        app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                            history_cell::new_error_event(format!(
+                                                "Login failed: {err}"
+                                            )),
+                                        )));
+                                    }
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            self.add_to_history(history_cell::new_error_event(format!(
+                                "Failed to start login: {err}"
+                            )));
+                        }
+                    }
+                    self.request_redraw();
+                    return;
                 }
-                self.request_exit();
+
+                match args.first().map(String::as_str) {
+                    Some("activate") => {
+                        let Some(id_raw) = args.get(1) else {
+                            self.add_to_history(history_cell::new_error_event(
+                                "Usage: /login activate <id>".to_string(),
+                            ));
+                            self.request_redraw();
+                            return;
+                        };
+                        let Ok(id) = id_raw.parse::<u32>() else {
+                            self.add_to_history(history_cell::new_error_event(format!(
+                                "Invalid credential id: {id_raw}",
+                            )));
+                            self.request_redraw();
+                            return;
+                        };
+
+                        match self.auth_manager.activate_chatgpt_credential(id) {
+                            Ok(()) => {
+                                let name = self
+                                    .auth_manager
+                                    .list_chatgpt_credentials()
+                                    .into_iter()
+                                    .find(|entry| entry.id == id)
+                                    .and_then(|entry| entry.name)
+                                    .unwrap_or_else(|| "<unnamed>".to_string());
+                                self.add_info_message(
+                                    format!("Active credential: #{id} ({name})"),
+                                    None,
+                                );
+                                self.prefetch_rate_limits();
+                            }
+                            Err(err) => {
+                                self.add_to_history(history_cell::new_error_event(err.to_string()));
+                                self.request_redraw();
+                            }
+                        }
+                    }
+                    Some("name") => {
+                        let Some(id_raw) = args.get(1) else {
+                            self.add_to_history(history_cell::new_error_event(
+                                "Usage: /login name <id> <name>".to_string(),
+                            ));
+                            self.request_redraw();
+                            return;
+                        };
+                        let Ok(id) = id_raw.parse::<u32>() else {
+                            self.add_to_history(history_cell::new_error_event(format!(
+                                "Invalid credential id: {id_raw}",
+                            )));
+                            self.request_redraw();
+                            return;
+                        };
+                        let new_name = args.get(2..).unwrap_or_default().join(" ");
+                        if new_name.trim().is_empty() {
+                            self.add_to_history(history_cell::new_error_event(
+                                "Usage: /login name <id> <name>".to_string(),
+                            ));
+                            self.request_redraw();
+                            return;
+                        }
+                        match self
+                            .auth_manager
+                            .rename_chatgpt_credential(id, Some(new_name.clone()))
+                        {
+                            Ok(()) => {
+                                self.add_info_message(
+                                    format!("Renamed credential #{id} to \"{new_name}\""),
+                                    None,
+                                );
+                            }
+                            Err(err) => {
+                                self.add_to_history(history_cell::new_error_event(err.to_string()));
+                                self.request_redraw();
+                            }
+                        }
+                    }
+                    _ => {
+                        self.add_to_history(history_cell::new_error_event(
+                            "Usage: /login | /login activate <id> | /login name <id> <name>"
+                                .to_string(),
+                        ));
+                        self.request_redraw();
+                    }
+                }
+            }
+            SlashCommand::Logout => {
+                let args = parse_positional_args(&rest);
+                let credentials = self.auth_manager.list_chatgpt_credentials();
+
+                if args.first().is_some_and(|arg| arg == "all") {
+                    if let Err(err) = self.auth_manager.logout() {
+                        tracing::error!("failed to logout: {err}");
+                    }
+                    self.request_exit();
+                    return;
+                }
+
+                if args.is_empty() {
+                    if credentials.len() <= 1 {
+                        if let Err(err) = self.auth_manager.logout() {
+                            tracing::error!("failed to logout: {err}");
+                        }
+                        self.request_exit();
+                    } else {
+                        self.add_to_history(history_cell::new_error_event(
+                            "Usage: /logout <id> | /logout all".to_string(),
+                        ));
+                        self.request_redraw();
+                    }
+                    return;
+                }
+
+                let id_raw = &args[0];
+                let Ok(id) = id_raw.parse::<u32>() else {
+                    self.add_to_history(history_cell::new_error_event(format!(
+                        "Invalid credential id: {id_raw}",
+                    )));
+                    self.request_redraw();
+                    return;
+                };
+
+                match self.auth_manager.logout_chatgpt_credential(id) {
+                    Ok(()) => {
+                        self.add_info_message(format!("Logged out credential #{id}"), None);
+                        if self.auth_manager.list_chatgpt_credentials().is_empty() {
+                            self.request_exit();
+                        } else {
+                            self.prefetch_rate_limits();
+                        }
+                    }
+                    Err(err) => {
+                        self.add_to_history(history_cell::new_error_event(err.to_string()));
+                        self.request_redraw();
+                    }
+                }
             }
             // SlashCommand::Undo => {
             //     self.app_event_tx.send(AppEvent::CodexOp(Op::Undo));

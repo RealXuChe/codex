@@ -74,7 +74,7 @@ const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
 #[derive(Debug, PartialEq)]
 pub enum InputResult {
     Submitted(String),
-    Command(SlashCommand),
+    Command { command: SlashCommand, rest: String },
     None,
 }
 
@@ -481,7 +481,13 @@ impl ChatComposer {
                         CommandItem::Builtin(cmd) => {
                             if cmd == SlashCommand::Skills {
                                 self.textarea.set_text("");
-                                return (InputResult::Command(cmd), true);
+                                return (
+                                    InputResult::Command {
+                                        command: cmd,
+                                        rest: String::new(),
+                                    },
+                                    true,
+                                );
                             }
 
                             let starts_with_cmd = first_line
@@ -525,12 +531,18 @@ impl ChatComposer {
                 // If the current line starts with a custom prompt name and includes
                 // positional args for a numeric-style template, expand and submit
                 // immediately regardless of the popup selection.
-                let first_line = self.textarea.text().lines().next().unwrap_or("");
-                if let Some((name, _rest)) = parse_slash_name(first_line)
+                let first_line = self
+                    .textarea
+                    .text()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if let Some((name, _rest)) = parse_slash_name(&first_line)
                     && let Some(prompt_name) = name.strip_prefix(&format!("{PROMPTS_CMD_PREFIX}:"))
                     && let Some(prompt) = self.custom_prompts.iter().find(|p| p.name == prompt_name)
                     && let Some(expanded) =
-                        expand_if_numeric_with_positional_args(prompt, first_line)
+                        expand_if_numeric_with_positional_args(prompt, &first_line)
                 {
                     self.textarea.set_text("");
                     return (InputResult::Submitted(expanded), true);
@@ -539,14 +551,17 @@ impl ChatComposer {
                 if let Some(sel) = popup.selected_item() {
                     match sel {
                         CommandItem::Builtin(cmd) => {
+                            let rest = parse_slash_name(&first_line)
+                                .map(|(_, rest)| rest.to_string())
+                                .unwrap_or_default();
                             self.textarea.set_text("");
-                            return (InputResult::Command(cmd), true);
+                            return (InputResult::Command { command: cmd, rest }, true);
                         }
                         CommandItem::UserPrompt(idx) => {
                             if let Some(prompt) = popup.prompt(idx) {
                                 match prompt_selection_action(
                                     prompt,
-                                    first_line,
+                                    &first_line,
                                     PromptSelectionMode::Submit,
                                 ) {
                                     PromptSelectionAction::Submit { text } => {
@@ -1092,15 +1107,26 @@ impl ChatComposer {
                 // the '/name' token and our caret-based heuristic hides the popup,
                 // but Enter should still dispatch the command rather than submit
                 // literal text.
-                let first_line = self.textarea.text().lines().next().unwrap_or("");
-                if let Some((name, rest)) = parse_slash_name(first_line)
-                    && rest.is_empty()
+                let first_line = self
+                    .textarea
+                    .text()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if let Some((name, rest)) = parse_slash_name(&first_line)
                     && let Some((_n, cmd)) = built_in_slash_commands()
                         .into_iter()
                         .find(|(n, _)| *n == name)
                 {
                     self.textarea.set_text("");
-                    return (InputResult::Command(cmd), true);
+                    return (
+                        InputResult::Command {
+                            command: cmd,
+                            rest: rest.to_string(),
+                        },
+                        true,
+                    );
                 }
                 // If we're in a paste-like burst capture, treat Enter as part of the burst
                 // and accumulate it rather than submitting or inserting immediately.
@@ -2735,9 +2761,7 @@ mod tests {
         // When a slash command is dispatched, the composer should return a
         // Command result (not submit literal text) and clear its textarea.
         match result {
-            InputResult::Command(cmd) => {
-                assert_eq!(cmd.command(), "init");
-            }
+            InputResult::Command { command, .. } => assert_eq!(command.command(), "init"),
             InputResult::Submitted(text) => {
                 panic!("expected command dispatch, but composer submitted literal text: {text}")
             }
@@ -2810,7 +2834,7 @@ mod tests {
         let (result, _needs_redraw) =
             composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match result {
-            InputResult::Command(cmd) => assert_eq!(cmd.command(), "diff"),
+            InputResult::Command { command, .. } => assert_eq!(command.command(), "diff"),
             InputResult::Submitted(text) => {
                 panic!("expected command dispatch after Tab completion, got literal submit: {text}")
             }
@@ -2841,9 +2865,7 @@ mod tests {
             composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         match result {
-            InputResult::Command(cmd) => {
-                assert_eq!(cmd.command(), "mention");
-            }
+            InputResult::Command { command, .. } => assert_eq!(command.command(), "mention"),
             InputResult::Submitted(text) => {
                 panic!("expected command dispatch, but composer submitted literal text: {text}")
             }
