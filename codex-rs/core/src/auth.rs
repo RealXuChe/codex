@@ -254,6 +254,7 @@ impl CodexAuth {
                 account_id: Some("account_id".to_string()),
             }),
             last_refresh: Some(Utc::now()),
+            credentials: None,
         };
 
         let auth_dot_json = Arc::new(Mutex::new(Some(auth_dot_json)));
@@ -318,6 +319,7 @@ pub fn login_with_api_key(
         openai_api_key: Some(api_key.to_string()),
         tokens: None,
         last_refresh: None,
+        credentials: None,
     };
     save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)
 }
@@ -456,6 +458,7 @@ fn load_auth(
         openai_api_key: auth_json_api_key,
         tokens,
         last_refresh,
+        credentials: _,
     } = auth_dot_json;
 
     // Prefer AuthMode.ApiKey if it's set in the auth.json.
@@ -471,6 +474,7 @@ fn load_auth(
             openai_api_key: None,
             tokens,
             last_refresh,
+            credentials: None,
         }))),
         client,
     }))
@@ -766,6 +770,7 @@ mod tests {
                     account_id: None,
                 }),
                 last_refresh: Some(last_refresh),
+                credentials: None,
             },
             auth_dot_json
         );
@@ -798,6 +803,7 @@ mod tests {
             openai_api_key: Some("sk-test-key".to_string()),
             tokens: None,
             last_refresh: None,
+            credentials: None,
         };
         super::save_auth(dir.path(), &auth_dot_json, AuthCredentialsStoreMode::File)?;
         let auth_file = get_auth_file(dir.path());
