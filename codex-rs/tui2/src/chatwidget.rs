@@ -23,6 +23,7 @@ use codex_core::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::CodexErrorInfo;
 use codex_core::protocol::CreditsSnapshot;
 use codex_core::protocol::DeprecationNoticeEvent;
 use codex_core::protocol::ErrorEvent;
@@ -619,6 +620,19 @@ impl ChatWidget {
 
             self.plan_type = snapshot.plan_type.or(self.plan_type);
 
+            if Self::rate_limits_exhausted(&snapshot) {
+                let resets_at = Self::rate_limits_resets_at(&snapshot);
+                let message = codex_core::error::format_usage_limit_reached_message(
+                    snapshot.plan_type,
+                    resets_at,
+                );
+                let previous_active_id = self.auth_manager.active_chatgpt_credential_id();
+                self.handle_active_credential_unusable(&message);
+                if self.auth_manager.active_chatgpt_credential_id() != previous_active_id {
+                    return;
+                }
+            }
+
             let warnings = self.rate_limit_warnings.take_warnings(
                 snapshot
                     .secondary
@@ -670,6 +684,34 @@ impl ChatWidget {
             self.rate_limit_snapshot = None;
         }
     }
+
+    fn rate_limits_exhausted(snapshot: &RateLimitSnapshot) -> bool {
+        snapshot
+            .primary
+            .as_ref()
+            .is_some_and(|window| window.used_percent == 100.0)
+            || snapshot
+                .secondary
+                .as_ref()
+                .is_some_and(|window| window.used_percent == 100.0)
+    }
+
+    fn rate_limits_resets_at(
+        snapshot: &RateLimitSnapshot,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        snapshot
+            .primary
+            .as_ref()
+            .and_then(|window| window.resets_at)
+            .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
+            .or_else(|| {
+                snapshot
+                    .secondary
+                    .as_ref()
+                    .and_then(|window| window.resets_at)
+                    .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
+            })
+    }
     /// Finalize any active exec as failed and stop/clear running UI state.
     fn finalize_turn(&mut self) {
         // Ensure any spinner is replaced by a red ✗ and flushed into history.
@@ -686,8 +728,13 @@ impl ChatWidget {
         self.model_family.clone()
     }
 
-    fn on_error(&mut self, message: String) {
+    fn on_error(&mut self, message: String, codex_error_info: Option<CodexErrorInfo>) {
         self.finalize_turn();
+
+        if matches!(codex_error_info, Some(CodexErrorInfo::UsageLimitExceeded)) {
+            self.handle_active_credential_unusable(&message);
+        }
+
         self.add_to_history(history_cell::new_error_event(message));
         self.request_redraw();
 
@@ -697,6 +744,57 @@ impl ChatWidget {
 
     fn on_warning(&mut self, message: impl Into<String>) {
         self.add_to_history(history_cell::new_warning_event(message.into()));
+        self.request_redraw();
+    }
+
+    fn handle_active_credential_unusable(&mut self, message: &str) {
+        let Some(active_id) = self.auth_manager.active_chatgpt_credential_id() else {
+            return;
+        };
+
+        let not_included_message = codex_core::error::usage_not_included_message();
+        let transitioned = if message == not_included_message {
+            self.auth_manager
+                .record_credential_not_included(active_id, message.to_string())
+        } else {
+            self.auth_manager
+                .record_credential_exhausted(active_id, message.to_string())
+        };
+
+        if transitioned {
+            let notice = if message == not_included_message {
+                format!(
+                    "Credential #{active_id} is not included in your plan. Run /status for details."
+                )
+            } else {
+                format!("Credential #{active_id} is out of quota. Run /status for details.")
+            };
+            self.add_to_history(history_cell::new_info_event(notice, None));
+        }
+
+        let Some(next_id) = self
+            .auth_manager
+            .next_chatgpt_candidate_credential_id(Some(active_id))
+        else {
+            return;
+        };
+        if next_id == active_id {
+            return;
+        }
+
+        self.add_to_history(history_cell::new_info_event(
+            format!("Switching to credential #{next_id}."),
+            None,
+        ));
+
+        match self.auth_manager.activate_chatgpt_credential(next_id) {
+            Ok(()) => {
+                self.prefetch_rate_limits();
+            }
+            Err(err) => {
+                self.add_to_history(history_cell::new_error_event(err.to_string()));
+            }
+        }
         self.request_redraw();
     }
 
@@ -2037,7 +2135,10 @@ impl ChatWidget {
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
             EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
-            EventMsg::Error(ErrorEvent { message, .. }) => self.on_error(message),
+            EventMsg::Error(ErrorEvent {
+                message,
+                codex_error_info,
+            }) => self.on_error(message, codex_error_info),
             EventMsg::McpStartupUpdate(ev) => self.on_mcp_startup_update(ev),
             EventMsg::McpStartupComplete(ev) => self.on_mcp_startup_complete(ev),
             EventMsg::TurnAborted(ev) => match ev.reason {
@@ -2045,7 +2146,7 @@ impl ChatWidget {
                     self.on_interrupted_turn(ev.reason);
                 }
                 TurnAbortReason::Replaced => {
-                    self.on_error("Turn aborted: replaced by a new task".to_owned())
+                    self.on_error("Turn aborted: replaced by a new task".to_owned(), None)
                 }
                 TurnAbortReason::ReviewEnded => {
                     self.on_interrupted_turn(ev.reason);
