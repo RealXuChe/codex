@@ -21,6 +21,8 @@ use codex_protocol::config_types::ForcedLoginMethod;
 pub use crate::auth::storage::AuthCredentialsStoreMode;
 pub use crate::auth::storage::AuthDotJson;
 use crate::auth::storage::AuthStorageBackend;
+pub use crate::auth::storage::CredentialEntryDotJson;
+pub use crate::auth::storage::CredentialsDotJson;
 use crate::auth::storage::create_auth_storage;
 use crate::config::Config;
 use crate::error::RefreshTokenFailedError;
@@ -106,12 +108,14 @@ impl CodexAuth {
         let token_data = self.get_current_token_data().ok_or_else(|| {
             RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
         })?;
+        let account_id = token_data.account_id.clone();
         let token = token_data.refresh_token;
 
         let refresh_response = try_refresh_token(token, &self.client).await?;
 
         let updated = update_tokens(
             &self.storage,
+            account_id.as_deref(),
             refresh_response.id_token,
             refresh_response.access_token,
             refresh_response.refresh_token,
@@ -151,6 +155,7 @@ impl CodexAuth {
                 ..
             }) => {
                 if last_refresh < Utc::now() - chrono::Duration::days(TOKEN_REFRESH_INTERVAL) {
+                    let account_id = tokens.account_id.clone();
                     let refresh_result = tokio::time::timeout(
                         Duration::from_secs(60),
                         try_refresh_token(tokens.refresh_token.clone(), &self.client),
@@ -169,6 +174,7 @@ impl CodexAuth {
 
                     let updated_auth_dot_json = update_tokens(
                         &self.storage,
+                        account_id.as_deref(),
                         refresh_response.id_token,
                         refresh_response.access_token,
                         refresh_response.refresh_token,
@@ -454,16 +460,26 @@ fn load_auth(
         None => return Ok(None),
     };
 
-    let AuthDotJson {
-        openai_api_key: auth_json_api_key,
-        tokens,
-        last_refresh,
-        credentials: _,
-    } = auth_dot_json;
+    let auth_json_api_key = auth_dot_json.openai_api_key.clone();
 
     // Prefer AuthMode.ApiKey if it's set in the auth.json.
     if let Some(api_key) = &auth_json_api_key {
         return Ok(Some(CodexAuth::from_api_key_with_client(api_key, client)));
+    }
+
+    let credentials = auth_dot_json.credentials.clone();
+    let (tokens, last_refresh) = match credentials.as_ref() {
+        Some(store) => store
+            .entries
+            .iter()
+            .min_by_key(|entry| entry.id)
+            .map(|entry| (Some(entry.tokens.clone()), entry.last_refresh))
+            .unwrap_or((auth_dot_json.tokens.clone(), auth_dot_json.last_refresh)),
+        None => (auth_dot_json.tokens.clone(), auth_dot_json.last_refresh),
+    };
+
+    if tokens.is_none() {
+        return Ok(None);
     }
 
     Ok(Some(CodexAuth {
@@ -474,7 +490,7 @@ fn load_auth(
             openai_api_key: None,
             tokens,
             last_refresh,
-            credentials: None,
+            credentials,
         }))),
         client,
     }))
@@ -482,6 +498,7 @@ fn load_auth(
 
 async fn update_tokens(
     storage: &Arc<dyn AuthStorageBackend>,
+    account_id: Option<&str>,
     id_token: Option<String>,
     access_token: Option<String>,
     refresh_token: Option<String>,
@@ -489,6 +506,45 @@ async fn update_tokens(
     let mut auth_dot_json = storage
         .load()?
         .ok_or(std::io::Error::other("Token data is not available."))?;
+
+    if let Some(credentials) = auth_dot_json.credentials.as_mut() {
+        let account_id = account_id.ok_or(std::io::Error::other(
+            "Token data is missing account_id; cannot update multi-credential store.",
+        ))?;
+
+        let (updated_tokens, updated_last_refresh) = {
+            let entry = credentials
+                .entries
+                .iter_mut()
+                .find(|entry| entry.tokens.account_id.as_deref() == Some(account_id))
+                .ok_or(std::io::Error::other(
+                    "Token data is not available for the current account_id.",
+                ))?;
+
+            if let Some(id_token) = id_token {
+                entry.tokens.id_token = parse_id_token(&id_token).map_err(std::io::Error::other)?;
+            }
+            if let Some(access_token) = access_token {
+                entry.tokens.access_token = access_token;
+            }
+            if let Some(refresh_token) = refresh_token {
+                entry.tokens.refresh_token = refresh_token;
+            }
+            entry.tokens.account_id = Some(account_id.to_string());
+            entry.last_refresh = Some(Utc::now());
+
+            (entry.tokens.clone(), entry.last_refresh)
+        };
+
+        storage.save(&auth_dot_json)?;
+
+        return Ok(AuthDotJson {
+            openai_api_key: auth_dot_json.openai_api_key.clone(),
+            tokens: Some(updated_tokens),
+            last_refresh: updated_last_refresh,
+            credentials: auth_dot_json.credentials.clone(),
+        });
+    }
 
     let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
     if let Some(id_token) = id_token {
@@ -672,6 +728,7 @@ mod tests {
         );
         let updated = super::update_tokens(
             &storage,
+            None,
             None,
             Some("new-access-token".to_string()),
             Some("new-refresh-token".to_string()),
