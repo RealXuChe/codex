@@ -116,6 +116,7 @@ use crate::render::renderable::RenderableExt;
 use crate::render::renderable::RenderableItem;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
+use crate::status::WorkspaceStatusEntry;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod interrupts;
@@ -2254,6 +2255,141 @@ impl ChatWidget {
             Local::now(),
             self.model_family.get_model_slug(),
         ));
+        self.add_multi_workspace_status_output();
+    }
+
+    fn add_multi_workspace_status_output(&mut self) {
+        let Some(auth) = self.auth_manager.auth() else {
+            return;
+        };
+        if auth.mode != AuthMode::ChatGPT {
+            return;
+        }
+
+        let credentials = self.auth_manager.list_chatgpt_credentials();
+        if credentials.is_empty() {
+            return;
+        }
+
+        let base_url = self.config.chatgpt_base_url.clone();
+        let app_event_tx = self.app_event_tx.clone();
+        let auth_manager = Arc::clone(&self.auth_manager);
+
+        tokio::spawn(async move {
+            let now = Local::now();
+            let mut workspaces: Vec<WorkspaceStatusEntry> = Vec::with_capacity(credentials.len());
+
+            for entry in credentials {
+                let Some(entry_auth) =
+                    auth.with_chatgpt_token_data(entry.tokens.clone(), entry.last_refresh)
+                else {
+                    continue;
+                };
+
+                let mut status_entry = WorkspaceStatusEntry {
+                    id: entry.id,
+                    name: entry.name.clone(),
+                    rate_limits: None,
+                    unusable_message: None,
+                    fetch_error: None,
+                };
+
+                match BackendClient::from_auth(base_url.clone(), &entry_auth).await {
+                    Ok(client) => match client.get_rate_limits().await {
+                        Ok(snapshot) => {
+                            let is_exhausted = snapshot
+                                .primary
+                                .as_ref()
+                                .is_some_and(|w| w.used_percent == 100.0)
+                                || snapshot
+                                    .secondary
+                                    .as_ref()
+                                    .is_some_and(|w| w.used_percent == 100.0);
+
+                            if is_exhausted {
+                                let resets_at = snapshot
+                                    .primary
+                                    .as_ref()
+                                    .and_then(|w| w.resets_at)
+                                    .and_then(|s| {
+                                        chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0)
+                                    })
+                                    .or_else(|| {
+                                        snapshot
+                                            .secondary
+                                            .as_ref()
+                                            .and_then(|w| w.resets_at)
+                                            .and_then(|s| {
+                                                chrono::DateTime::<chrono::Utc>::from_timestamp(
+                                                    s, 0,
+                                                )
+                                            })
+                                    });
+
+                                let message = codex_core::error::format_usage_limit_reached_message(
+                                    snapshot.plan_type,
+                                    resets_at,
+                                );
+
+                                let transitioned = auth_manager
+                                    .record_credential_exhausted(entry.id, message.clone());
+                                status_entry.unusable_message = Some(message);
+
+                                if transitioned {
+                                    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                        history_cell::new_info_event(
+                                            format!(
+                                                "Credential #{id} is out of quota. Run /status for details.",
+                                                id = entry.id
+                                            ),
+                                            None,
+                                        ),
+                                    )));
+                                }
+                            } else {
+                                auth_manager.record_credential_available(entry.id);
+                            }
+
+                            status_entry.rate_limits =
+                                Some(crate::status::rate_limit_snapshot_display(&snapshot, now));
+                        }
+                        Err(err) => {
+                            let msg = err.to_string();
+                            if msg.contains("usageNotIncluded")
+                                || msg.contains("usage_not_included")
+                            {
+                                let message = codex_core::error::usage_not_included_message();
+                                let transitioned = auth_manager
+                                    .record_credential_not_included(entry.id, message.clone());
+                                status_entry.unusable_message = Some(message);
+                                if transitioned {
+                                    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                        history_cell::new_info_event(
+                                            format!(
+                                                "Credential #{id} is not included in your plan. Run /status for details.",
+                                                id = entry.id
+                                            ),
+                                            None,
+                                        ),
+                                    )));
+                                }
+                            } else {
+                                status_entry.fetch_error = Some(msg);
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        status_entry.fetch_error = Some(err.to_string());
+                    }
+                }
+
+                workspaces.push(status_entry);
+            }
+
+            app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                crate::status::new_multi_workspace_status_output(workspaces, now),
+            )));
+        });
     }
     fn stop_rate_limit_poller(&mut self) {
         if let Some(handle) = self.rate_limit_poller.take() {

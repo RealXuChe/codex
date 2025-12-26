@@ -3,11 +3,14 @@ mod card;
 mod format;
 mod helpers;
 mod rate_limits;
+mod workspaces;
 
 pub(crate) use card::new_status_output;
 pub(crate) use helpers::format_tokens_compact;
 pub(crate) use rate_limits::RateLimitSnapshotDisplay;
 pub(crate) use rate_limits::rate_limit_snapshot_display;
+pub(crate) use workspaces::WorkspaceStatusEntry;
+pub(crate) use workspaces::new_multi_workspace_status_output;
 
 #[cfg(test)]
 mod tests;
