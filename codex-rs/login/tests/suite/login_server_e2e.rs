@@ -79,6 +79,35 @@ fn start_mock_issuer(chatgpt_account_id: &str) -> (SocketAddr, thread::JoinHandl
     (addr, handle)
 }
 
+fn make_test_jwt(chatgpt_account_id: &str) -> String {
+    #[derive(serde::Serialize)]
+    struct Header {
+        alg: &'static str,
+        typ: &'static str,
+    }
+    let header = Header {
+        alg: "none",
+        typ: "JWT",
+    };
+    let payload = serde_json::json!({
+        "email": "user@example.com",
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": "pro",
+            "chatgpt_account_id": chatgpt_account_id,
+            "chatgpt_user_id": "user-123",
+        }
+    });
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let header_bytes = serde_json::to_vec(&header).unwrap();
+    let payload_bytes = serde_json::to_vec(&payload).unwrap();
+    format!(
+        "{}.{}.{}",
+        b64(&header_bytes),
+        b64(&payload_bytes),
+        b64(b"sig")
+    )
+}
+
 #[tokio::test]
 async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -94,10 +123,10 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     let stale_auth = serde_json::json!({
         "OPENAI_API_KEY": "sk-stale",
         "tokens": {
-            "id_token": "stale.header.payload",
+            "id_token": make_test_jwt(chatgpt_account_id),
             "access_token": "stale-access",
             "refresh_token": "stale-refresh",
-            "account_id": "stale-acc"
+            "account_id": chatgpt_account_id
         }
     });
     std::fs::write(
@@ -132,10 +161,20 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     // Simulate browser callback, and follow redirect to /success
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
+        .no_proxy()
         .build()?;
-    let url = format!("http://127.0.0.1:{login_port}/auth/callback?code=abc&state=test_state_123");
+    let url = format!("http://localhost:{login_port}/auth/callback?code=abc&state=test_state_123");
     let resp = client.get(&url).send().await?;
-    assert!(resp.status().is_success());
+    let status = resp.status();
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    assert!(
+        status.is_success(),
+        "expected success response, got {status}, location={location:?}"
+    );
 
     // Wait for server shutdown
     server.block_until_done().await?;
@@ -148,9 +187,13 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     // API key. See obtain_api_key in server.rs for details. Once we remove this old mechanism
     // from the code, this test should be updated to expect that the API key is no longer present.
     assert_eq!(json["OPENAI_API_KEY"], "access-123");
-    assert_eq!(json["tokens"]["access_token"], "access-123");
-    assert_eq!(json["tokens"]["refresh_token"], "refresh-123");
-    assert_eq!(json["tokens"]["account_id"], chatgpt_account_id);
+    let entries = json["credentials"]["entries"]
+        .as_array()
+        .expect("credentials.entries should be an array");
+    assert_eq!(entries.len(), 1, "expected one credential entry");
+    assert_eq!(entries[0]["tokens"]["access_token"], "access-123");
+    assert_eq!(entries[0]["tokens"]["refresh_token"], "refresh-123");
+    assert_eq!(entries[0]["tokens"]["account_id"], chatgpt_account_id);
 
     // Stop mock issuer
     drop(issuer_handle);
@@ -184,10 +227,19 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
     let server = run_login_server(opts)?;
     let login_port = server.actual_port;
 
-    let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{login_port}/auth/callback?code=abc&state=state2");
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let url = format!("http://localhost:{login_port}/auth/callback?code=abc&state=state2");
     let resp = client.get(&url).send().await?;
-    assert!(resp.status().is_success());
+    let status = resp.status();
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    assert!(
+        status.is_success(),
+        "expected success response, got {status}, location={location:?}"
+    );
 
     server.block_until_done().await?;
 
