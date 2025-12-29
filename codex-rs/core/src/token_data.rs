@@ -30,6 +30,8 @@ pub struct IdTokenInfo {
     pub(crate) chatgpt_plan_type: Option<PlanType>,
     /// Organization/workspace identifier associated with the token, if present.
     pub chatgpt_account_id: Option<String>,
+    /// User identifier associated with the token, if present.
+    pub chatgpt_user_id: Option<String>,
     pub raw_jwt: String,
 }
 
@@ -75,6 +77,8 @@ struct AuthClaims {
     chatgpt_plan_type: Option<PlanType>,
     #[serde(default)]
     chatgpt_account_id: Option<String>,
+    #[serde(default)]
+    chatgpt_user_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -104,12 +108,14 @@ pub fn parse_id_token(id_token: &str) -> Result<IdTokenInfo, IdTokenInfoError> {
             raw_jwt: id_token.to_string(),
             chatgpt_plan_type: auth.chatgpt_plan_type,
             chatgpt_account_id: auth.chatgpt_account_id,
+            chatgpt_user_id: auth.chatgpt_user_id,
         }),
         None => Ok(IdTokenInfo {
             email: claims.email,
             raw_jwt: id_token.to_string(),
             chatgpt_plan_type: None,
             chatgpt_account_id: None,
+            chatgpt_user_id: None,
         }),
     }
 }
@@ -148,7 +154,8 @@ mod tests {
         let payload = serde_json::json!({
             "email": "user@example.com",
             "https://api.openai.com/auth": {
-                "chatgpt_plan_type": "pro"
+                "chatgpt_plan_type": "pro",
+                "chatgpt_user_id": "user-123"
             }
         });
 
@@ -164,6 +171,7 @@ mod tests {
         let info = parse_id_token(&fake_jwt).expect("should parse");
         assert_eq!(info.email.as_deref(), Some("user@example.com"));
         assert_eq!(info.get_chatgpt_plan_type().as_deref(), Some("Pro"));
+        assert_eq!(info.chatgpt_user_id.as_deref(), Some("user-123"));
     }
 
     #[test]
