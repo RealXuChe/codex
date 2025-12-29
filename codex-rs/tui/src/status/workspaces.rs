@@ -16,6 +16,7 @@ use ratatui::text::Span;
 pub(crate) struct WorkspaceStatusEntry {
     pub id: u32,
     pub name: Option<String>,
+    pub is_active: bool,
     pub rate_limits: Option<RateLimitSnapshotDisplay>,
     pub unusable_message: Option<String>,
     pub fetch_error: Option<String>,
@@ -40,8 +41,15 @@ pub(crate) fn new_multi_workspace_status_output(
         }
 
         let name = entry.name.unwrap_or_else(|| "<unnamed>".to_string());
+        let active_marker = if entry.is_active {
+            "★".cyan().bold()
+        } else {
+            " ".dim()
+        };
         lines.push(Line::from(vec![
             "• ".dim(),
+            active_marker,
+            " ".into(),
             format!("#{id} ", id = entry.id).into(),
             name.into(),
         ]));

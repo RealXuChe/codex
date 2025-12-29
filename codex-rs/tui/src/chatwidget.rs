@@ -2434,6 +2434,12 @@ impl ChatWidget {
     }
 
     pub(crate) fn add_status_output(&mut self) {
+        let show_rate_limits = self
+            .auth_manager
+            .auth()
+            .is_some_and(|auth| auth.mode != AuthMode::ChatGPT)
+            || self.auth_manager.list_chatgpt_credentials().len() <= 1;
+
         let default_usage = TokenUsage::default();
         let (total_usage, context_usage) = if let Some(ti) = &self.token_info {
             (&ti.total_token_usage, Some(&ti.last_token_usage))
@@ -2447,6 +2453,7 @@ impl ChatWidget {
             total_usage,
             context_usage,
             &self.conversation_id,
+            show_rate_limits,
             self.rate_limit_snapshot.as_ref(),
             self.plan_type,
             Local::now(),
@@ -2468,6 +2475,7 @@ impl ChatWidget {
             return;
         }
 
+        let active_id = self.auth_manager.active_chatgpt_credential_id();
         let base_url = self.config.chatgpt_base_url.clone();
         let app_event_tx = self.app_event_tx.clone();
         let auth_manager = Arc::clone(&self.auth_manager);
@@ -2486,6 +2494,7 @@ impl ChatWidget {
                 let mut status_entry = WorkspaceStatusEntry {
                     id: entry.id,
                     name: entry.name.clone(),
+                    is_active: Some(entry.id) == active_id,
                     rate_limits: None,
                     unusable_message: None,
                     fetch_error: None,

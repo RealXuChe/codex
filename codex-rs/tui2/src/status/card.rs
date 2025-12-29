@@ -65,7 +65,7 @@ struct StatusHistoryCell {
     account: Option<StatusAccountDisplay>,
     session_id: Option<String>,
     token_usage: StatusTokenUsageData,
-    rate_limits: StatusRateLimitData,
+    rate_limits: Option<StatusRateLimitData>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,6 +76,7 @@ pub(crate) fn new_status_output(
     total_usage: &TokenUsage,
     context_usage: Option<&TokenUsage>,
     session_id: &Option<ConversationId>,
+    show_rate_limits: bool,
     rate_limits: Option<&RateLimitSnapshotDisplay>,
     plan_type: Option<PlanType>,
     now: DateTime<Local>,
@@ -89,6 +90,7 @@ pub(crate) fn new_status_output(
         total_usage,
         context_usage,
         session_id,
+        show_rate_limits,
         rate_limits,
         plan_type,
         now,
@@ -107,6 +109,7 @@ impl StatusHistoryCell {
         total_usage: &TokenUsage,
         context_usage: Option<&TokenUsage>,
         session_id: &Option<ConversationId>,
+        show_rate_limits: bool,
         rate_limits: Option<&RateLimitSnapshotDisplay>,
         plan_type: Option<PlanType>,
         now: DateTime<Local>,
@@ -148,7 +151,7 @@ impl StatusHistoryCell {
             output: total_usage.output_tokens,
             context_window,
         };
-        let rate_limits = compose_rate_limit_data(rate_limits, now);
+        let rate_limits = show_rate_limits.then(|| compose_rate_limit_data(rate_limits, now));
 
         Self {
             model_name,
@@ -203,7 +206,11 @@ impl StatusHistoryCell {
         available_inner_width: usize,
         formatter: &FieldFormatter,
     ) -> Vec<Line<'static>> {
-        match &self.rate_limits {
+        let Some(rate_limits) = self.rate_limits.as_ref() else {
+            return Vec::new();
+        };
+
+        match rate_limits {
             StatusRateLimitData::Available(rows_data) => {
                 if rows_data.is_empty() {
                     return vec![
@@ -282,7 +289,11 @@ impl StatusHistoryCell {
     }
 
     fn collect_rate_limit_labels(&self, seen: &mut BTreeSet<String>, labels: &mut Vec<String>) {
-        match &self.rate_limits {
+        let Some(rate_limits) = self.rate_limits.as_ref() else {
+            return;
+        };
+
+        match rate_limits {
             StatusRateLimitData::Available(rows) => {
                 if rows.is_empty() {
                     push_label(labels, seen, "Limits");
