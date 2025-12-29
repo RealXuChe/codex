@@ -1437,10 +1437,9 @@ impl AuthManager {
         ))
     }
 
-    /// Attempt to refresh the current auth token (if any). On success, reload
-    /// the auth state from disk so other components observe refreshed token.
-    /// If the token refresh fails in a permanent (non‑transient) way, logs out
-    /// to clear invalid auth state.
+    /// Attempt to refresh the current auth token (if any). On success, update
+    /// the shared in-memory auth state so other components observe refreshed token.
+    /// If the token refresh fails in a permanent (non‑transient) way, returns an error.
     pub async fn refresh_token(&self) -> Result<Option<String>, RefreshTokenError> {
         let Some(auth) = self.auth() else {
             return Ok(None);
@@ -1449,11 +1448,7 @@ impl AuthManager {
             return Ok(None);
         };
         match auth.refresh_token().await {
-            Ok(token) => {
-                // Reload to pick up persisted changes.
-                self.reload();
-                Ok(Some(token))
-            }
+            Ok(token) => Ok(Some(token)),
             Err(e) => {
                 tracing::error!("Failed to refresh token: {}", e);
                 Err(e)
