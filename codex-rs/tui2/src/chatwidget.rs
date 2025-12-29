@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use codex_app_server_protocol::AuthMode;
 use codex_backend_client::Client as BackendClient;
 use codex_core::config::Config;
 use codex_core::config::ConstraintResult;
@@ -136,6 +135,7 @@ use codex_common::approval_presets::builtin_approval_presets;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ConversationManager;
+use codex_core::auth::Auth;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_file_search::FileMatch;
@@ -2346,7 +2346,7 @@ impl ChatWidget {
         let show_rate_limits = self
             .auth_manager
             .auth()
-            .is_some_and(|auth| auth.mode != AuthMode::ChatGPT)
+            .is_some_and(|auth| matches!(auth, Auth::ApiKey { .. }))
             || self.auth_manager.list_chatgpt_credentials().len() <= 1;
 
         let default_usage = TokenUsage::default();
@@ -2375,9 +2375,9 @@ impl ChatWidget {
         let Some(auth) = self.auth_manager.auth() else {
             return;
         };
-        if auth.mode != AuthMode::ChatGPT {
+        let Auth::ChatGpt { handle: auth } = auth else {
             return;
-        }
+        };
 
         let credentials = self.auth_manager.list_chatgpt_credentials();
         if credentials.is_empty() {
@@ -2518,9 +2518,9 @@ impl ChatWidget {
         let Some(auth) = self.auth_manager.auth() else {
             return;
         };
-        if auth.mode != AuthMode::ChatGPT {
+        let Auth::ChatGpt { handle: auth } = auth else {
             return;
-        }
+        };
 
         let run_startup_credential_scan = self.startup_credential_scan_pending;
         self.startup_credential_scan_pending = false;
@@ -2626,7 +2626,7 @@ impl ChatWidget {
 
             loop {
                 if let Some(auth) = auth_manager.auth()
-                    && auth.mode == AuthMode::ChatGPT
+                    && let Auth::ChatGpt { handle: auth } = auth
                     && let Some(snapshot) = fetch_rate_limits(base_url.clone(), auth).await
                 {
                     app_event_tx.send(AppEvent::RateLimitSnapshotFetched(snapshot));

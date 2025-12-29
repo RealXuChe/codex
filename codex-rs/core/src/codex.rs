@@ -29,6 +29,7 @@ use crate::user_notification::UserNotifier;
 use crate::util::error_or_panic;
 use async_channel::Receiver;
 use async_channel::Sender;
+use codex_app_server_protocol::AuthMode;
 use codex_protocol::ConversationId;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::items::TurnItem;
@@ -618,13 +619,24 @@ impl Session {
         maybe_push_chat_wire_api_deprecation(&config, &mut post_session_configured_events);
 
         // todo(aibrahim): why are we passing model here while it can change?
+        let auth = auth_manager.auth();
+        let (account_id, account_email, auth_mode) = match auth {
+            Some(crate::auth::Auth::ChatGpt { handle }) => (
+                handle.get_account_id(),
+                handle.get_account_email(),
+                Some(AuthMode::ChatGPT),
+            ),
+            Some(crate::auth::Auth::ApiKey { .. }) => (None, None, Some(AuthMode::ApiKey)),
+            None => (None, None, None),
+        };
+
         let otel_manager = OtelManager::new(
             conversation_id,
             session_configuration.model.as_str(),
             session_configuration.model.as_str(),
-            auth_manager.auth().and_then(|a| a.get_account_id()),
-            auth_manager.auth().and_then(|a| a.get_account_email()),
-            auth_manager.auth().map(|a| a.mode),
+            account_id,
+            account_email,
+            auth_mode,
             config.otel.log_user_prompt,
             terminal::user_agent(),
             session_configuration.session_source.clone(),

@@ -57,6 +57,12 @@ impl CredentialKey {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum Auth {
+    ApiKey { api_key: String },
+    ChatGpt { handle: CodexAuth },
+}
+
 #[derive(Debug, Clone)]
 pub struct CodexAuth {
     pub mode: AuthMode,
@@ -1374,8 +1380,12 @@ impl AuthManager {
     }
 
     /// Current cached auth (clone). May be `None` if not logged in or load failed.
-    pub fn auth(&self) -> Option<CodexAuth> {
-        self.inner.read().ok().and_then(|c| c.auth.clone())
+    pub fn auth(&self) -> Option<Auth> {
+        let auth = self.inner.read().ok().and_then(|c| c.auth.clone())?;
+        match auth.mode {
+            AuthMode::ApiKey => auth.api_key.clone().map(|api_key| Auth::ApiKey { api_key }),
+            AuthMode::ChatGPT => Some(Auth::ChatGpt { handle: auth }),
+        }
     }
 
     pub fn codex_home(&self) -> &Path {
@@ -1442,9 +1452,11 @@ impl AuthManager {
     /// If the token refresh fails in a permanent (non‑transient) way, logs out
     /// to clear invalid auth state.
     pub async fn refresh_token(&self) -> Result<Option<String>, RefreshTokenError> {
-        let auth = match self.auth() {
-            Some(a) => a,
-            None => return Ok(None),
+        let Some(auth) = self.auth() else {
+            return Ok(None);
+        };
+        let Auth::ChatGpt { handle: auth } = auth else {
+            return Ok(None);
         };
         match auth.refresh_token().await {
             Ok(token) => {
@@ -1471,7 +1483,10 @@ impl AuthManager {
     }
 
     pub fn get_auth_mode(&self) -> Option<AuthMode> {
-        self.auth().map(|a| a.mode)
+        self.auth().map(|auth| match auth {
+            Auth::ApiKey { .. } => AuthMode::ApiKey,
+            Auth::ChatGpt { .. } => AuthMode::ChatGPT,
+        })
     }
 
     pub fn list_chatgpt_credentials(&self) -> Vec<CredentialEntryDotJson> {

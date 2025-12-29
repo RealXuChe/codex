@@ -37,6 +37,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::AuthManager;
+use crate::auth::Auth as CoreAuth;
 use crate::auth::RefreshTokenError;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -156,9 +157,12 @@ impl ModelClient {
         let mut refreshed = false;
         loop {
             let auth = auth_manager.as_ref().and_then(|m| m.auth());
-            let api_provider = self
-                .provider
-                .to_api_provider(auth.as_ref().map(|a| a.mode))?;
+            let api_provider =
+                self.provider
+                    .to_api_provider(auth.as_ref().map(|auth| match auth {
+                        CoreAuth::ApiKey { .. } => AuthMode::ApiKey,
+                        CoreAuth::ChatGpt { .. } => AuthMode::ChatGPT,
+                    }))?;
             let api_auth = auth_provider_from_auth(auth.clone(), &self.provider).await?;
             let transport = ReqwestTransport::new(build_reqwest_client());
             let (request_telemetry, sse_telemetry) = self.build_streaming_telemetry();
@@ -245,9 +249,12 @@ impl ModelClient {
         let mut refreshed = false;
         loop {
             let auth = auth_manager.as_ref().and_then(|m| m.auth());
-            let api_provider = self
-                .provider
-                .to_api_provider(auth.as_ref().map(|a| a.mode))?;
+            let api_provider =
+                self.provider
+                    .to_api_provider(auth.as_ref().map(|auth| match auth {
+                        CoreAuth::ApiKey { .. } => AuthMode::ApiKey,
+                        CoreAuth::ChatGpt { .. } => AuthMode::ChatGPT,
+                    }))?;
             let api_auth = auth_provider_from_auth(auth.clone(), &self.provider).await?;
             let transport = ReqwestTransport::new(build_reqwest_client());
             let (request_telemetry, sse_telemetry) = self.build_streaming_telemetry();
@@ -332,7 +339,10 @@ impl ModelClient {
         let auth = auth_manager.as_ref().and_then(|m| m.auth());
         let api_provider = self
             .provider
-            .to_api_provider(auth.as_ref().map(|a| a.mode))?;
+            .to_api_provider(auth.as_ref().map(|auth| match auth {
+                CoreAuth::ApiKey { .. } => AuthMode::ApiKey,
+                CoreAuth::ChatGpt { .. } => AuthMode::ChatGPT,
+            }))?;
         let api_auth = auth_provider_from_auth(auth.clone(), &self.provider).await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
         let request_telemetry = self.build_request_telemetry();
@@ -487,15 +497,16 @@ async fn handle_unauthorized(
     status: StatusCode,
     refreshed: &mut bool,
     auth_manager: &Option<Arc<AuthManager>>,
-    auth: &Option<crate::auth::CodexAuth>,
+    auth: &Option<CoreAuth>,
 ) -> Result<()> {
     if *refreshed {
         return Err(map_unauthorized_status(status));
     }
 
     if let Some(manager) = auth_manager.as_ref()
-        && let Some(auth) = auth.as_ref()
-        && auth.mode == AuthMode::ChatGPT
+        && auth
+            .as_ref()
+            .is_some_and(|auth| matches!(auth, CoreAuth::ChatGpt { .. }))
     {
         match manager.refresh_token().await {
             Ok(_) => {
