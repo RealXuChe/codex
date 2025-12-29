@@ -126,7 +126,8 @@ async fn device_code_login_integration_succeeds() -> anyhow::Result<()> {
 
     let jwt = make_jwt(json!({
         "https://api.openai.com/auth": {
-            "chatgpt_account_id": "acct_321"
+            "chatgpt_account_id": "acct_321",
+            "chatgpt_user_id": "user-321"
         }
     }));
 
@@ -143,7 +144,13 @@ async fn device_code_login_integration_succeeds() -> anyhow::Result<()> {
         .context("auth.json should load after login succeeds")?
         .context("auth.json written")?;
     // assert_eq!(auth.openai_api_key.as_deref(), Some("api-key-321"));
-    let tokens = auth.tokens.expect("tokens persisted");
+    let credentials = auth.credentials.expect("credentials persisted");
+    assert_eq!(
+        credentials.entries.len(),
+        1,
+        "expected one credential entry"
+    );
+    let tokens = &credentials.entries[0].tokens;
     assert_eq!(tokens.access_token, "access-token-123");
     assert_eq!(tokens.refresh_token, "refresh-token-123");
     assert_eq!(tokens.id_token.raw_jwt, jwt);
@@ -165,7 +172,8 @@ async fn device_code_login_rejects_workspace_mismatch() -> anyhow::Result<()> {
     let jwt = make_jwt(json!({
         "https://api.openai.com/auth": {
             "chatgpt_account_id": "acct_321",
-            "organization_id": "org-actual"
+            "organization_id": "org-actual",
+            "chatgpt_user_id": "user-321"
         }
     }));
 
@@ -233,7 +241,12 @@ async fn device_code_login_integration_persists_without_api_key_on_exchange_fail
 
     mock_poll_token_two_step(&mock_server, Arc::new(AtomicUsize::new(0)), 404).await;
 
-    let jwt = make_jwt(json!({}));
+    let jwt = make_jwt(json!({
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "acct_321",
+            "chatgpt_user_id": "user-321"
+        }
+    }));
 
     mock_oauth_token_single(&mock_server, jwt.clone()).await;
 
@@ -256,10 +269,17 @@ async fn device_code_login_integration_persists_without_api_key_on_exchange_fail
         .context("auth.json should load after login succeeds")?
         .context("auth.json written")?;
     assert!(auth.openai_api_key.is_none());
-    let tokens = auth.tokens.expect("tokens persisted");
+    let credentials = auth.credentials.expect("credentials persisted");
+    assert_eq!(
+        credentials.entries.len(),
+        1,
+        "expected one credential entry"
+    );
+    let tokens = &credentials.entries[0].tokens;
     assert_eq!(tokens.access_token, "access-token-123");
     assert_eq!(tokens.refresh_token, "refresh-token-123");
     assert_eq!(tokens.id_token.raw_jwt, jwt);
+    assert_eq!(tokens.account_id.as_deref(), Some("acct_321"));
     Ok(())
 }
 

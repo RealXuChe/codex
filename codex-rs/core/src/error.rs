@@ -9,6 +9,7 @@ use chrono::Local;
 use chrono::Utc;
 use codex_async_utils::CancelErr;
 use codex_protocol::ConversationId;
+use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::RateLimitSnapshot;
@@ -346,6 +347,32 @@ impl std::fmt::Display for UsageLimitReachedError {
 
         write!(f, "{message}")
     }
+}
+
+pub fn format_usage_limit_reached_message(
+    plan_type: Option<AccountPlanType>,
+    resets_at: Option<DateTime<Utc>>,
+) -> String {
+    let internal_plan_type = plan_type.map(|plan| match plan {
+        AccountPlanType::Free => PlanType::Known(KnownPlan::Free),
+        AccountPlanType::Plus => PlanType::Known(KnownPlan::Plus),
+        AccountPlanType::Pro => PlanType::Known(KnownPlan::Pro),
+        AccountPlanType::Team => PlanType::Known(KnownPlan::Team),
+        AccountPlanType::Business => PlanType::Known(KnownPlan::Business),
+        AccountPlanType::Enterprise => PlanType::Known(KnownPlan::Enterprise),
+        AccountPlanType::Edu => PlanType::Known(KnownPlan::Edu),
+        AccountPlanType::Unknown => PlanType::Unknown("unknown".to_string()),
+    });
+    UsageLimitReachedError {
+        plan_type: internal_plan_type,
+        resets_at,
+        rate_limits: None,
+    }
+    .to_string()
+}
+
+pub fn usage_not_included_message() -> String {
+    CodexErr::UsageNotIncluded.to_string()
 }
 
 fn retry_suffix(resets_at: Option<&DateTime<Utc>>) -> String {

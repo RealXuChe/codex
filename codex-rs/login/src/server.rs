@@ -16,6 +16,8 @@ use base64::Engine;
 use chrono::Utc;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::auth::AuthDotJson;
+use codex_core::auth::CredentialEntryDotJson;
+use codex_core::auth::load_auth_dot_json;
 use codex_core::auth::save_auth;
 use codex_core::default_client::originator;
 use codex_core::token_data::TokenData;
@@ -552,17 +554,70 @@ pub(crate) async fn persist_tokens_async(
             refresh_token,
             account_id: None,
         };
-        if let Some(acc) = jwt_auth_claims(&id_token)
-            .get("chatgpt_account_id")
-            .and_then(|v| v.as_str())
-        {
-            tokens.account_id = Some(acc.to_string());
+        if tokens.account_id.is_none() {
+            tokens.account_id = tokens.id_token.chatgpt_account_id.clone();
         }
-        let auth = AuthDotJson {
-            openai_api_key: api_key,
-            tokens: Some(tokens),
-            last_refresh: Some(Utc::now()),
-        };
+
+        let account_id = tokens.account_id.as_deref().ok_or_else(|| {
+            io::Error::other("ChatGPT login succeeded but account_id is missing.")
+        })?;
+
+        let chatgpt_user_id = tokens.id_token.chatgpt_user_id.as_deref().ok_or_else(|| {
+            io::Error::other("ChatGPT login succeeded but chatgpt_user_id is missing.")
+        })?;
+
+        let mut auth =
+            load_auth_dot_json(&codex_home, auth_credentials_store_mode)?.unwrap_or(AuthDotJson {
+                openai_api_key: None,
+                tokens: None,
+                last_refresh: None,
+                credentials: None,
+            });
+
+        let mut store = auth.credentials.take().unwrap_or_default();
+
+        // Best-effort migration of the legacy single-credential shape into the multi store.
+        if store.entries.is_empty()
+            && let Some(legacy_tokens) = auth.tokens.take()
+            && legacy_tokens.account_id.is_some()
+        {
+            store.entries.push(CredentialEntryDotJson {
+                id: 1,
+                name: None,
+                tokens: legacy_tokens,
+                last_refresh: auth.last_refresh.take(),
+            });
+        }
+
+        let now = Utc::now();
+        if let Some(existing) = store.entries.iter_mut().find(|entry| {
+            entry.tokens.account_id.as_deref() == Some(account_id)
+                && entry.tokens.id_token.chatgpt_user_id.as_deref() == Some(chatgpt_user_id)
+        }) {
+            // Same (account_id, chatgpt_user_id): refresh token contents in-place, keep name and id.
+            existing.tokens = tokens;
+            existing.last_refresh = Some(now);
+        } else {
+            let next_id = store
+                .entries
+                .iter()
+                .map(|e| e.id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            store.entries.push(CredentialEntryDotJson {
+                id: next_id,
+                name: None,
+                tokens,
+                last_refresh: Some(now),
+            });
+        }
+
+        auth.openai_api_key = api_key.or(auth.openai_api_key);
+        auth.tokens = None;
+        auth.last_refresh = None;
+        auth.credentials = Some(store);
+
         save_auth(&codex_home, &auth, auth_credentials_store_mode)
     })
     .await

@@ -21,6 +21,8 @@ use codex_protocol::config_types::ForcedLoginMethod;
 pub use crate::auth::storage::AuthCredentialsStoreMode;
 pub use crate::auth::storage::AuthDotJson;
 use crate::auth::storage::AuthStorageBackend;
+pub use crate::auth::storage::CredentialEntryDotJson;
+pub use crate::auth::storage::CredentialsDotJson;
 use crate::auth::storage::create_auth_storage;
 use crate::config::Config;
 use crate::error::RefreshTokenFailedError;
@@ -35,6 +37,7 @@ use codex_protocol::account::PlanType as AccountPlanType;
 #[cfg(any(test, feature = "test-support"))]
 use once_cell::sync::Lazy;
 use serde_json::Value;
+use std::collections::HashMap;
 #[cfg(any(test, feature = "test-support"))]
 use tempfile::TempDir;
 use thiserror::Error;
@@ -100,18 +103,51 @@ impl From<RefreshTokenError> for std::io::Error {
 }
 
 impl CodexAuth {
+    /// Create a new `CodexAuth` instance that shares this auth's storage and HTTP client,
+    /// but uses the provided ChatGPT token payload as its "current" auth.json.
+    ///
+    /// This is useful for operations like `/status` that need to query usage for
+    /// multiple stored credentials without changing the process-wide active credential.
+    pub fn with_chatgpt_token_data(
+        &self,
+        tokens: TokenData,
+        last_refresh: Option<chrono::DateTime<Utc>>,
+    ) -> Option<Self> {
+        if self.mode != AuthMode::ChatGPT {
+            return None;
+        }
+
+        let auth_dot_json = AuthDotJson {
+            openai_api_key: None,
+            tokens: Some(tokens),
+            last_refresh,
+            credentials: None,
+        };
+        Some(Self {
+            mode: AuthMode::ChatGPT,
+            api_key: None,
+            auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
+            storage: Arc::clone(&self.storage),
+            client: self.client.clone(),
+        })
+    }
+
     pub async fn refresh_token(&self) -> Result<String, RefreshTokenError> {
         tracing::info!("Refreshing token");
 
         let token_data = self.get_current_token_data().ok_or_else(|| {
             RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
         })?;
+        let account_id = token_data.account_id.clone();
+        let chatgpt_user_id = token_data.id_token.chatgpt_user_id.clone();
         let token = token_data.refresh_token;
 
         let refresh_response = try_refresh_token(token, &self.client).await?;
 
         let updated = update_tokens(
             &self.storage,
+            account_id.as_deref(),
+            chatgpt_user_id.as_deref(),
             refresh_response.id_token,
             refresh_response.access_token,
             refresh_response.refresh_token,
@@ -151,6 +187,8 @@ impl CodexAuth {
                 ..
             }) => {
                 if last_refresh < Utc::now() - chrono::Duration::days(TOKEN_REFRESH_INTERVAL) {
+                    let account_id = tokens.account_id.clone();
+                    let chatgpt_user_id = tokens.id_token.chatgpt_user_id.clone();
                     let refresh_result = tokio::time::timeout(
                         Duration::from_secs(60),
                         try_refresh_token(tokens.refresh_token.clone(), &self.client),
@@ -169,6 +207,8 @@ impl CodexAuth {
 
                     let updated_auth_dot_json = update_tokens(
                         &self.storage,
+                        account_id.as_deref(),
+                        chatgpt_user_id.as_deref(),
                         refresh_response.id_token,
                         refresh_response.access_token,
                         refresh_response.refresh_token,
@@ -254,6 +294,7 @@ impl CodexAuth {
                 account_id: Some("account_id".to_string()),
             }),
             last_refresh: Some(Utc::now()),
+            credentials: None,
         };
 
         let auth_dot_json = Arc::new(Mutex::new(Some(auth_dot_json)));
@@ -318,6 +359,7 @@ pub fn login_with_api_key(
         openai_api_key: Some(api_key.to_string()),
         tokens: None,
         last_refresh: None,
+        credentials: None,
     };
     save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)
 }
@@ -452,15 +494,26 @@ fn load_auth(
         None => return Ok(None),
     };
 
-    let AuthDotJson {
-        openai_api_key: auth_json_api_key,
-        tokens,
-        last_refresh,
-    } = auth_dot_json;
+    let auth_json_api_key = auth_dot_json.openai_api_key.clone();
 
     // Prefer AuthMode.ApiKey if it's set in the auth.json.
     if let Some(api_key) = &auth_json_api_key {
         return Ok(Some(CodexAuth::from_api_key_with_client(api_key, client)));
+    }
+
+    let credentials = auth_dot_json.credentials.clone();
+    let (tokens, last_refresh) = match credentials.as_ref() {
+        Some(store) => store
+            .entries
+            .iter()
+            .min_by_key(|entry| entry.id)
+            .map(|entry| (Some(entry.tokens.clone()), entry.last_refresh))
+            .unwrap_or((auth_dot_json.tokens.clone(), auth_dot_json.last_refresh)),
+        None => (auth_dot_json.tokens.clone(), auth_dot_json.last_refresh),
+    };
+
+    if tokens.is_none() {
+        return Ok(None);
     }
 
     Ok(Some(CodexAuth {
@@ -471,6 +524,7 @@ fn load_auth(
             openai_api_key: None,
             tokens,
             last_refresh,
+            credentials,
         }))),
         client,
     }))
@@ -478,6 +532,8 @@ fn load_auth(
 
 async fn update_tokens(
     storage: &Arc<dyn AuthStorageBackend>,
+    account_id: Option<&str>,
+    chatgpt_user_id: Option<&str>,
     id_token: Option<String>,
     access_token: Option<String>,
     refresh_token: Option<String>,
@@ -485,6 +541,51 @@ async fn update_tokens(
     let mut auth_dot_json = storage
         .load()?
         .ok_or(std::io::Error::other("Token data is not available."))?;
+
+    if let Some(credentials) = auth_dot_json.credentials.as_mut() {
+        let account_id = account_id.ok_or(std::io::Error::other(
+            "Token data is missing account_id; cannot update multi-credential store.",
+        ))?;
+        let chatgpt_user_id = chatgpt_user_id.ok_or(std::io::Error::other(
+            "Token data is missing chatgpt_user_id; cannot update multi-credential store.",
+        ))?;
+
+        let (updated_tokens, updated_last_refresh) = {
+            let entry = credentials
+                .entries
+                .iter_mut()
+                .find(|entry| {
+                    entry.tokens.account_id.as_deref() == Some(account_id)
+                        && entry.tokens.id_token.chatgpt_user_id.as_deref() == Some(chatgpt_user_id)
+                })
+                .ok_or(std::io::Error::other(
+                    "Token data is not available for the current (account_id, chatgpt_user_id).",
+                ))?;
+
+            if let Some(id_token) = id_token {
+                entry.tokens.id_token = parse_id_token(&id_token).map_err(std::io::Error::other)?;
+            }
+            if let Some(access_token) = access_token {
+                entry.tokens.access_token = access_token;
+            }
+            if let Some(refresh_token) = refresh_token {
+                entry.tokens.refresh_token = refresh_token;
+            }
+            entry.tokens.account_id = Some(account_id.to_string());
+            entry.last_refresh = Some(Utc::now());
+
+            (entry.tokens.clone(), entry.last_refresh)
+        };
+
+        storage.save(&auth_dot_json)?;
+
+        return Ok(AuthDotJson {
+            openai_api_key: auth_dot_json.openai_api_key.clone(),
+            tokens: Some(updated_tokens),
+            last_refresh: updated_last_refresh,
+            credentials: auth_dot_json.credentials.clone(),
+        });
+    }
 
     let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
     if let Some(id_token) = id_token {
@@ -628,6 +729,17 @@ use std::sync::RwLock;
 #[derive(Clone, Debug)]
 struct CachedAuth {
     auth: Option<CodexAuth>,
+    chatgpt_credentials: Option<CredentialsDotJson>,
+    active_chatgpt_credential_id: Option<u32>,
+    credential_status: HashMap<u32, CredentialKnownStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CredentialKnownStatus {
+    Unknown,
+    Available,
+    Exhausted { message: String },
+    NotIncluded { message: String },
 }
 
 #[cfg(test)]
@@ -668,6 +780,8 @@ mod tests {
         );
         let updated = super::update_tokens(
             &storage,
+            None,
+            None,
             None,
             Some("new-access-token".to_string()),
             Some("new-refresh-token".to_string()),
@@ -759,6 +873,7 @@ mod tests {
                         email: Some("user@example.com".to_string()),
                         chatgpt_plan_type: Some(InternalPlanType::Known(InternalKnownPlan::Pro)),
                         chatgpt_account_id: None,
+                        chatgpt_user_id: Some("user-12345".to_string()),
                         raw_jwt: fake_jwt,
                     },
                     access_token: "test-access-token".to_string(),
@@ -766,6 +881,7 @@ mod tests {
                     account_id: None,
                 }),
                 last_refresh: Some(last_refresh),
+                credentials: None,
             },
             auth_dot_json
         );
@@ -798,6 +914,7 @@ mod tests {
             openai_api_key: Some("sk-test-key".to_string()),
             tokens: None,
             last_refresh: None,
+            credentials: None,
         };
         super::save_auth(dir.path(), &auth_dot_json, AuthCredentialsStoreMode::File)?;
         let auth_file = get_auth_file(dir.path());
@@ -1069,6 +1186,108 @@ pub struct AuthManager {
 }
 
 impl AuthManager {
+    fn load_cached_auth(
+        codex_home: &Path,
+        enable_codex_api_key_env: bool,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+        preferred_active_chatgpt_credential_id: Option<u32>,
+    ) -> std::io::Result<CachedAuth> {
+        if enable_codex_api_key_env && let Some(api_key) = read_codex_api_key_from_env() {
+            let client = crate::default_client::create_client();
+            return Ok(CachedAuth {
+                auth: Some(CodexAuth::from_api_key_with_client(
+                    api_key.as_str(),
+                    client,
+                )),
+                chatgpt_credentials: None,
+                active_chatgpt_credential_id: None,
+                credential_status: HashMap::new(),
+            });
+        }
+
+        let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+        let client = crate::default_client::create_client();
+        let auth_dot_json = match storage.load()? {
+            Some(auth) => auth,
+            None => {
+                return Ok(CachedAuth {
+                    auth: None,
+                    chatgpt_credentials: None,
+                    active_chatgpt_credential_id: None,
+                    credential_status: HashMap::new(),
+                });
+            }
+        };
+
+        // Prefer AuthMode.ApiKey if it's set in the auth.json.
+        if let Some(api_key) = auth_dot_json.openai_api_key.as_ref() {
+            return Ok(CachedAuth {
+                auth: Some(CodexAuth::from_api_key_with_client(api_key, client)),
+                chatgpt_credentials: None,
+                active_chatgpt_credential_id: None,
+                credential_status: HashMap::new(),
+            });
+        }
+
+        let credentials = auth_dot_json.credentials.clone().or_else(|| {
+            auth_dot_json
+                .tokens
+                .clone()
+                .map(|tokens| CredentialsDotJson {
+                    entries: vec![CredentialEntryDotJson {
+                        id: 1,
+                        name: None,
+                        tokens,
+                        last_refresh: auth_dot_json.last_refresh,
+                    }],
+                })
+        });
+
+        let active_id = credentials.as_ref().and_then(|store| {
+            if store.entries.is_empty() {
+                return None;
+            }
+
+            if let Some(preferred) = preferred_active_chatgpt_credential_id
+                && store.entries.iter().any(|entry| entry.id == preferred)
+            {
+                return Some(preferred);
+            }
+
+            store.entries.iter().map(|entry| entry.id).min()
+        });
+
+        let (tokens, last_refresh) = match (credentials.as_ref(), active_id) {
+            (Some(store), Some(active_id)) => store
+                .entries
+                .iter()
+                .find(|entry| entry.id == active_id)
+                .map(|entry| (Some(entry.tokens.clone()), entry.last_refresh))
+                .unwrap_or((None, None)),
+            _ => (None, None),
+        };
+
+        let auth = tokens.map(|tokens| CodexAuth {
+            api_key: None,
+            mode: AuthMode::ChatGPT,
+            storage: storage.clone(),
+            auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
+                openai_api_key: None,
+                tokens: Some(tokens),
+                last_refresh,
+                credentials: credentials.clone(),
+            }))),
+            client,
+        });
+
+        Ok(CachedAuth {
+            auth,
+            chatgpt_credentials: credentials,
+            active_chatgpt_credential_id: active_id,
+            credential_status: HashMap::new(),
+        })
+    }
+
     /// Create a new manager loading the initial auth using the provided
     /// preferred auth method. Errors loading auth are swallowed; `auth()` will
     /// simply return `None` in that case so callers can treat it as an
@@ -1078,16 +1297,21 @@ impl AuthManager {
         enable_codex_api_key_env: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
     ) -> Self {
-        let auth = load_auth(
+        let cached = AuthManager::load_cached_auth(
             &codex_home,
             enable_codex_api_key_env,
             auth_credentials_store_mode,
+            None,
         )
-        .ok()
-        .flatten();
+        .unwrap_or(CachedAuth {
+            auth: None,
+            chatgpt_credentials: None,
+            active_chatgpt_credential_id: None,
+            credential_status: HashMap::new(),
+        });
         Self {
             codex_home,
-            inner: RwLock::new(CachedAuth { auth }),
+            inner: RwLock::new(cached),
             enable_codex_api_key_env,
             auth_credentials_store_mode,
         }
@@ -1097,7 +1321,12 @@ impl AuthManager {
     #[expect(clippy::expect_used)]
     /// Create an AuthManager with a specific CodexAuth, for testing only.
     pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
-        let cached = CachedAuth { auth: Some(auth) };
+        let cached = CachedAuth {
+            auth: Some(auth),
+            chatgpt_credentials: None,
+            active_chatgpt_credential_id: None,
+            credential_status: HashMap::new(),
+        };
         let temp_dir = tempfile::tempdir().expect("temp codex home");
         let codex_home = temp_dir.path().to_path_buf();
         TEST_AUTH_TEMP_DIRS
@@ -1115,7 +1344,12 @@ impl AuthManager {
     #[cfg(any(test, feature = "test-support"))]
     /// Create an AuthManager with a specific CodexAuth and codex home, for testing only.
     pub fn from_auth_for_testing_with_home(auth: CodexAuth, codex_home: PathBuf) -> Arc<Self> {
-        let cached = CachedAuth { auth: Some(auth) };
+        let cached = CachedAuth {
+            auth: Some(auth),
+            chatgpt_credentials: None,
+            active_chatgpt_credential_id: None,
+            credential_status: HashMap::new(),
+        };
         Arc::new(Self {
             codex_home,
             inner: RwLock::new(cached),
@@ -1136,16 +1370,31 @@ impl AuthManager {
     /// Force a reload of the auth information from auth.json. Returns
     /// whether the auth value changed.
     pub fn reload(&self) -> bool {
-        let new_auth = load_auth(
+        let preferred_active_id = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|cached| cached.active_chatgpt_credential_id);
+
+        let new_cached = AuthManager::load_cached_auth(
             &self.codex_home,
             self.enable_codex_api_key_env,
             self.auth_credentials_store_mode,
+            preferred_active_id,
         )
         .ok()
-        .flatten();
+        .unwrap_or(CachedAuth {
+            auth: None,
+            chatgpt_credentials: None,
+            active_chatgpt_credential_id: None,
+            credential_status: HashMap::new(),
+        });
+
         if let Ok(mut guard) = self.inner.write() {
-            let changed = !AuthManager::auths_equal(&guard.auth, &new_auth);
-            guard.auth = new_auth;
+            let changed = !AuthManager::auths_equal(&guard.auth, &new_cached.auth);
+            guard.auth = new_cached.auth;
+            guard.chatgpt_credentials = new_cached.chatgpt_credentials;
+            guard.active_chatgpt_credential_id = new_cached.active_chatgpt_credential_id;
             changed
         } else {
             false
@@ -1208,5 +1457,208 @@ impl AuthManager {
 
     pub fn get_auth_mode(&self) -> Option<AuthMode> {
         self.auth().map(|a| a.mode)
+    }
+
+    pub fn list_chatgpt_credentials(&self) -> Vec<CredentialEntryDotJson> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|cached| cached.chatgpt_credentials.clone())
+            .map(|store| store.entries)
+            .unwrap_or_default()
+    }
+
+    pub fn active_chatgpt_credential_id(&self) -> Option<u32> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|cached| cached.active_chatgpt_credential_id)
+    }
+
+    pub fn activate_chatgpt_credential(&self, id: u32) -> std::io::Result<()> {
+        let new_cached = AuthManager::load_cached_auth(
+            &self.codex_home,
+            self.enable_codex_api_key_env,
+            self.auth_credentials_store_mode,
+            Some(id),
+        )?;
+
+        let has_id = new_cached
+            .chatgpt_credentials
+            .as_ref()
+            .is_some_and(|store| store.entries.iter().any(|entry| entry.id == id));
+        if !has_id {
+            return Err(std::io::Error::other(format!(
+                "Unknown credential id: {id}"
+            )));
+        }
+
+        if let Ok(mut guard) = self.inner.write() {
+            let previous_status = guard.credential_status.clone();
+            *guard = CachedAuth {
+                credential_status: previous_status,
+                ..new_cached
+            };
+        }
+        Ok(())
+    }
+
+    pub fn next_chatgpt_candidate_credential_id(&self, after: Option<u32>) -> Option<u32> {
+        let cached = self.inner.read().ok()?;
+        let store = cached.chatgpt_credentials.as_ref()?;
+        if store.entries.is_empty() {
+            return None;
+        }
+
+        let mut ids: Vec<u32> = store.entries.iter().map(|e| e.id).collect();
+        ids.sort_unstable();
+
+        let start_idx = after
+            .and_then(|after| ids.iter().position(|id| *id == after))
+            .map(|idx| (idx + 1) % ids.len())
+            .unwrap_or(0);
+
+        for offset in 0..ids.len() {
+            let idx = (start_idx + offset) % ids.len();
+            let id = ids[idx];
+            match cached.credential_status.get(&id) {
+                Some(CredentialKnownStatus::Exhausted { .. })
+                | Some(CredentialKnownStatus::NotIncluded { .. }) => {}
+                _ => return Some(id),
+            }
+        }
+
+        None
+    }
+
+    pub fn record_credential_available(&self, id: u32) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard
+                .credential_status
+                .insert(id, CredentialKnownStatus::Available);
+        }
+    }
+
+    pub fn record_credential_exhausted(&self, id: u32, message: String) -> bool {
+        self.set_credential_unusable(id, CredentialKnownStatus::Exhausted { message })
+    }
+
+    pub fn record_credential_not_included(&self, id: u32, message: String) -> bool {
+        self.set_credential_unusable(id, CredentialKnownStatus::NotIncluded { message })
+    }
+
+    fn set_credential_unusable(&self, id: u32, status: CredentialKnownStatus) -> bool {
+        let Ok(mut guard) = self.inner.write() else {
+            return false;
+        };
+
+        let prev = guard
+            .credential_status
+            .get(&id)
+            .cloned()
+            .unwrap_or(CredentialKnownStatus::Unknown);
+        guard.credential_status.insert(id, status);
+
+        matches!(
+            prev,
+            CredentialKnownStatus::Unknown | CredentialKnownStatus::Available
+        )
+    }
+
+    pub fn rename_chatgpt_credential(&self, id: u32, name: Option<String>) -> std::io::Result<()> {
+        let Some(mut auth_dot_json) =
+            load_auth_dot_json(&self.codex_home, self.auth_credentials_store_mode)?
+        else {
+            return Err(std::io::Error::other("Not logged in."));
+        };
+
+        let mut store = match auth_dot_json.credentials.take() {
+            Some(store) => store,
+            None => {
+                let Some(tokens) = auth_dot_json.tokens.take() else {
+                    return Err(std::io::Error::other("No ChatGPT credentials found."));
+                };
+                let entry = CredentialEntryDotJson {
+                    id: 1,
+                    name: None,
+                    tokens,
+                    last_refresh: auth_dot_json.last_refresh.take(),
+                };
+                CredentialsDotJson {
+                    entries: vec![entry],
+                }
+            }
+        };
+
+        let Some(entry) = store.entries.iter_mut().find(|entry| entry.id == id) else {
+            return Err(std::io::Error::other(format!(
+                "Unknown credential id: {id}"
+            )));
+        };
+        entry.name = name.filter(|s| !s.trim().is_empty());
+
+        auth_dot_json.credentials = Some(store);
+        auth_dot_json.tokens = None;
+        auth_dot_json.last_refresh = None;
+        save_auth(
+            &self.codex_home,
+            &auth_dot_json,
+            self.auth_credentials_store_mode,
+        )?;
+        self.reload();
+        Ok(())
+    }
+
+    pub fn logout_chatgpt_credential(&self, id: u32) -> std::io::Result<()> {
+        let Some(mut auth_dot_json) =
+            load_auth_dot_json(&self.codex_home, self.auth_credentials_store_mode)?
+        else {
+            return Err(std::io::Error::other("Not logged in."));
+        };
+
+        let mut store = match auth_dot_json.credentials.take() {
+            Some(store) => store,
+            None => {
+                // Legacy single-token format.
+                if id != 1 {
+                    return Err(std::io::Error::other(format!(
+                        "Unknown credential id: {id}"
+                    )));
+                }
+                self.logout()?;
+                return Ok(());
+            }
+        };
+
+        let before = store.entries.len();
+        store.entries.retain(|entry| entry.id != id);
+        if store.entries.len() == before {
+            return Err(std::io::Error::other(format!(
+                "Unknown credential id: {id}"
+            )));
+        }
+
+        if store.entries.is_empty() {
+            self.logout()?;
+            return Ok(());
+        }
+
+        // Keep the rules simple: after deletion, re-number remaining entries 1..N.
+        store.entries.sort_by_key(|entry| entry.id);
+        for (idx, entry) in store.entries.iter_mut().enumerate() {
+            entry.id = (idx + 1) as u32;
+        }
+
+        auth_dot_json.credentials = Some(store);
+        auth_dot_json.tokens = None;
+        auth_dot_json.last_refresh = None;
+        save_auth(
+            &self.codex_home,
+            &auth_dot_json,
+            self.auth_credentials_store_mode,
+        )?;
+
+        self.reload();
+        Ok(())
     }
 }

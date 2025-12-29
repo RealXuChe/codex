@@ -237,6 +237,9 @@ enum LoginSubcommand {
 struct LogoutCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
+
+    /// Logout target: a credential id (e.g. "2") or "all".
+    target: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -545,7 +548,7 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 &mut logout_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            run_logout(logout_cli.config_overrides).await;
+            run_logout(logout_cli.config_overrides, logout_cli.target).await;
         }
         Some(Subcommand::Completion(completion_cli)) => {
             print_completion(completion_cli);

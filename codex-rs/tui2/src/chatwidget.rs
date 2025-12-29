@@ -23,6 +23,7 @@ use codex_core::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::CodexErrorInfo;
 use codex_core::protocol::CreditsSnapshot;
 use codex_core::protocol::DeprecationNoticeEvent;
 use codex_core::protocol::ErrorEvent;
@@ -94,6 +95,7 @@ use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
+use crate::bottom_pane::parse_positional_args;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::diff_render::display_path_for;
@@ -115,6 +117,7 @@ use crate::render::renderable::RenderableExt;
 use crate::render::renderable::RenderableItem;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
+use crate::status::WorkspaceStatusEntry;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod interrupts;
@@ -295,6 +298,7 @@ pub(crate) struct ChatWidget {
     rate_limit_warnings: RateLimitWarningState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
     rate_limit_poller: Option<JoinHandle<()>>,
+    startup_credential_scan_pending: bool,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
@@ -617,6 +621,19 @@ impl ChatWidget {
 
             self.plan_type = snapshot.plan_type.or(self.plan_type);
 
+            if Self::rate_limits_exhausted(&snapshot) {
+                let resets_at = Self::rate_limits_resets_at(&snapshot);
+                let message = codex_core::error::format_usage_limit_reached_message(
+                    snapshot.plan_type,
+                    resets_at,
+                );
+                let previous_active_id = self.auth_manager.active_chatgpt_credential_id();
+                self.handle_active_credential_unusable(&message);
+                if self.auth_manager.active_chatgpt_credential_id() != previous_active_id {
+                    return;
+                }
+            }
+
             let warnings = self.rate_limit_warnings.take_warnings(
                 snapshot
                     .secondary
@@ -668,6 +685,34 @@ impl ChatWidget {
             self.rate_limit_snapshot = None;
         }
     }
+
+    fn rate_limits_exhausted(snapshot: &RateLimitSnapshot) -> bool {
+        snapshot
+            .primary
+            .as_ref()
+            .is_some_and(|window| window.used_percent == 100.0)
+            || snapshot
+                .secondary
+                .as_ref()
+                .is_some_and(|window| window.used_percent == 100.0)
+    }
+
+    fn rate_limits_resets_at(
+        snapshot: &RateLimitSnapshot,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        snapshot
+            .primary
+            .as_ref()
+            .and_then(|window| window.resets_at)
+            .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
+            .or_else(|| {
+                snapshot
+                    .secondary
+                    .as_ref()
+                    .and_then(|window| window.resets_at)
+                    .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
+            })
+    }
     /// Finalize any active exec as failed and stop/clear running UI state.
     fn finalize_turn(&mut self) {
         // Ensure any spinner is replaced by a red ✗ and flushed into history.
@@ -684,8 +729,13 @@ impl ChatWidget {
         self.model_family.clone()
     }
 
-    fn on_error(&mut self, message: String) {
+    fn on_error(&mut self, message: String, codex_error_info: Option<CodexErrorInfo>) {
         self.finalize_turn();
+
+        if matches!(codex_error_info, Some(CodexErrorInfo::UsageLimitExceeded)) {
+            self.handle_active_credential_unusable(&message);
+        }
+
         self.add_to_history(history_cell::new_error_event(message));
         self.request_redraw();
 
@@ -695,6 +745,58 @@ impl ChatWidget {
 
     fn on_warning(&mut self, message: impl Into<String>) {
         self.add_to_history(history_cell::new_warning_event(message.into()));
+        self.request_redraw();
+    }
+
+    fn handle_active_credential_unusable(&mut self, message: &str) {
+        let Some(active_id) = self.auth_manager.active_chatgpt_credential_id() else {
+            return;
+        };
+
+        let not_included_message = codex_core::error::usage_not_included_message();
+        let transitioned = if message == not_included_message {
+            self.auth_manager
+                .record_credential_not_included(active_id, message.to_string())
+        } else {
+            self.auth_manager
+                .record_credential_exhausted(active_id, message.to_string())
+        };
+
+        if transitioned {
+            let notice = if message == not_included_message {
+                format!(
+                    "Credential #{active_id} is not included in your plan. Run /status for details."
+                )
+            } else {
+                format!("Credential #{active_id} is out of quota. Run /status for details.")
+            };
+            self.add_to_history(history_cell::new_info_event(notice, None));
+        }
+
+        let Some(next_id) = self
+            .auth_manager
+            .next_chatgpt_candidate_credential_id(Some(active_id))
+        else {
+            return;
+        };
+        if next_id == active_id {
+            return;
+        }
+
+        self.add_to_history(history_cell::new_info_event(
+            format!("Switching to credential #{next_id}."),
+            None,
+        ));
+
+        match self.auth_manager.activate_chatgpt_credential(next_id) {
+            Ok(()) => {
+                self.startup_credential_scan_pending = false;
+                self.prefetch_rate_limits();
+            }
+            Err(err) => {
+                self.add_to_history(history_cell::new_error_event(err.to_string()));
+            }
+        }
         self.request_redraw();
     }
 
@@ -1319,6 +1421,7 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
+            startup_credential_scan_pending: true,
             stream_controller: None,
             running_commands: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
@@ -1404,6 +1507,7 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
+            startup_credential_scan_pending: true,
             stream_controller: None,
             running_commands: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
@@ -1500,8 +1604,8 @@ impl ChatWidget {
                         };
                         self.queue_user_message(user_message);
                     }
-                    InputResult::Command(cmd) => {
-                        self.dispatch_command(cmd);
+                    InputResult::Command { command, rest } => {
+                        self.dispatch_command(command, rest);
                     }
                     InputResult::None => {}
                 }
@@ -1524,7 +1628,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn dispatch_command(&mut self, cmd: SlashCommand) {
+    fn dispatch_command(&mut self, cmd: SlashCommand, rest: String) {
         if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
             let message = format!(
                 "'/{}' is disabled while a task is in progress.",
@@ -1576,14 +1680,199 @@ impl ChatWidget {
             SlashCommand::Quit | SlashCommand::Exit => {
                 self.request_exit();
             }
-            SlashCommand::Logout => {
-                if let Err(e) = codex_core::auth::logout(
-                    &self.config.codex_home,
-                    self.config.cli_auth_credentials_store_mode,
-                ) {
-                    tracing::error!("failed to logout: {e}");
+            SlashCommand::Login => {
+                let args = parse_positional_args(&rest);
+                if args.is_empty() {
+                    let opts = codex_login::ServerOptions::new(
+                        self.config.codex_home.clone(),
+                        codex_login::CLIENT_ID.to_string(),
+                        None,
+                        self.config.cli_auth_credentials_store_mode,
+                    );
+                    match codex_login::run_login_server(opts) {
+                        Ok(child) => {
+                            let auth_url = child.auth_url.clone();
+                            self.add_info_message(
+                                format!(
+                                    "Continue login in your browser:\n{auth_url}\n\n(After login completes, run /status to verify credentials.)"
+                                ),
+                                None,
+                            );
+
+                            let auth_manager = Arc::clone(&self.auth_manager);
+                            let app_event_tx = self.app_event_tx.clone();
+                            tokio::spawn(async move {
+                                match child.block_until_done().await {
+                                    Ok(()) => {
+                                        auth_manager.reload();
+                                        let credential_count =
+                                            auth_manager.list_chatgpt_credentials().len();
+                                        app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                            history_cell::new_info_event(
+                                                format!(
+                                                    "Login completed. Stored ChatGPT credentials: {credential_count}."
+                                                ),
+                                                None,
+                                            ),
+                                        )));
+                                    }
+                                    Err(err) => {
+                                        app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                            history_cell::new_error_event(format!(
+                                                "Login failed: {err}"
+                                            )),
+                                        )));
+                                    }
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            self.add_to_history(history_cell::new_error_event(format!(
+                                "Failed to start login: {err}"
+                            )));
+                        }
+                    }
+                    self.request_redraw();
+                    return;
                 }
-                self.request_exit();
+
+                match args.first().map(String::as_str) {
+                    Some("activate") => {
+                        let Some(id_raw) = args.get(1) else {
+                            self.add_to_history(history_cell::new_error_event(
+                                "Usage: /login activate <id>".to_string(),
+                            ));
+                            self.request_redraw();
+                            return;
+                        };
+                        let Ok(id) = id_raw.parse::<u32>() else {
+                            self.add_to_history(history_cell::new_error_event(format!(
+                                "Invalid credential id: {id_raw}",
+                            )));
+                            self.request_redraw();
+                            return;
+                        };
+
+                        match self.auth_manager.activate_chatgpt_credential(id) {
+                            Ok(()) => {
+                                let name = self
+                                    .auth_manager
+                                    .list_chatgpt_credentials()
+                                    .into_iter()
+                                    .find(|entry| entry.id == id)
+                                    .and_then(|entry| entry.name)
+                                    .unwrap_or_else(|| "<unnamed>".to_string());
+                                self.add_info_message(
+                                    format!("Active credential: #{id} ({name})"),
+                                    None,
+                                );
+                                self.startup_credential_scan_pending = false;
+                                self.prefetch_rate_limits();
+                            }
+                            Err(err) => {
+                                self.add_to_history(history_cell::new_error_event(err.to_string()));
+                                self.request_redraw();
+                            }
+                        }
+                    }
+                    Some("name") => {
+                        let Some(id_raw) = args.get(1) else {
+                            self.add_to_history(history_cell::new_error_event(
+                                "Usage: /login name <id> <name>".to_string(),
+                            ));
+                            self.request_redraw();
+                            return;
+                        };
+                        let Ok(id) = id_raw.parse::<u32>() else {
+                            self.add_to_history(history_cell::new_error_event(format!(
+                                "Invalid credential id: {id_raw}",
+                            )));
+                            self.request_redraw();
+                            return;
+                        };
+                        let new_name = args.get(2..).unwrap_or_default().join(" ");
+                        if new_name.trim().is_empty() {
+                            self.add_to_history(history_cell::new_error_event(
+                                "Usage: /login name <id> <name>".to_string(),
+                            ));
+                            self.request_redraw();
+                            return;
+                        }
+                        match self
+                            .auth_manager
+                            .rename_chatgpt_credential(id, Some(new_name.clone()))
+                        {
+                            Ok(()) => {
+                                self.add_info_message(
+                                    format!("Renamed credential #{id} to \"{new_name}\""),
+                                    None,
+                                );
+                            }
+                            Err(err) => {
+                                self.add_to_history(history_cell::new_error_event(err.to_string()));
+                                self.request_redraw();
+                            }
+                        }
+                    }
+                    _ => {
+                        self.add_to_history(history_cell::new_error_event(
+                            "Usage: /login | /login activate <id> | /login name <id> <name>"
+                                .to_string(),
+                        ));
+                        self.request_redraw();
+                    }
+                }
+            }
+            SlashCommand::Logout => {
+                let args = parse_positional_args(&rest);
+                let credentials = self.auth_manager.list_chatgpt_credentials();
+
+                if args.first().is_some_and(|arg| arg == "all") {
+                    if let Err(err) = self.auth_manager.logout() {
+                        tracing::error!("failed to logout: {err}");
+                    }
+                    self.request_exit();
+                    return;
+                }
+
+                if args.is_empty() {
+                    if credentials.len() <= 1 {
+                        if let Err(err) = self.auth_manager.logout() {
+                            tracing::error!("failed to logout: {err}");
+                        }
+                        self.request_exit();
+                    } else {
+                        self.add_to_history(history_cell::new_error_event(
+                            "Usage: /logout <id> | /logout all".to_string(),
+                        ));
+                        self.request_redraw();
+                    }
+                    return;
+                }
+
+                let id_raw = &args[0];
+                let Ok(id) = id_raw.parse::<u32>() else {
+                    self.add_to_history(history_cell::new_error_event(format!(
+                        "Invalid credential id: {id_raw}",
+                    )));
+                    self.request_redraw();
+                    return;
+                };
+
+                match self.auth_manager.logout_chatgpt_credential(id) {
+                    Ok(()) => {
+                        self.add_info_message(format!("Logged out credential #{id}"), None);
+                        if self.auth_manager.list_chatgpt_credentials().is_empty() {
+                            self.request_exit();
+                        } else {
+                            self.prefetch_rate_limits();
+                        }
+                    }
+                    Err(err) => {
+                        self.add_to_history(history_cell::new_error_event(err.to_string()));
+                        self.request_redraw();
+                    }
+                }
             }
             // SlashCommand::Undo => {
             //     self.app_event_tx.send(AppEvent::CodexOp(Op::Undo));
@@ -1851,7 +2140,10 @@ impl ChatWidget {
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
             EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
-            EventMsg::Error(ErrorEvent { message, .. }) => self.on_error(message),
+            EventMsg::Error(ErrorEvent {
+                message,
+                codex_error_info,
+            }) => self.on_error(message, codex_error_info),
             EventMsg::McpStartupUpdate(ev) => self.on_mcp_startup_update(ev),
             EventMsg::McpStartupComplete(ev) => self.on_mcp_startup_complete(ev),
             EventMsg::TurnAborted(ev) => match ev.reason {
@@ -1859,7 +2151,7 @@ impl ChatWidget {
                     self.on_interrupted_turn(ev.reason);
                 }
                 TurnAbortReason::Replaced => {
-                    self.on_error("Turn aborted: replaced by a new task".to_owned())
+                    self.on_error("Turn aborted: replaced by a new task".to_owned(), None)
                 }
                 TurnAbortReason::ReviewEnded => {
                     self.on_interrupted_turn(ev.reason);
@@ -2051,6 +2343,12 @@ impl ChatWidget {
     }
 
     pub(crate) fn add_status_output(&mut self) {
+        let show_rate_limits = self
+            .auth_manager
+            .auth()
+            .is_some_and(|auth| auth.mode != AuthMode::ChatGPT)
+            || self.auth_manager.list_chatgpt_credentials().len() <= 1;
+
         let default_usage = TokenUsage::default();
         let (total_usage, context_usage) = if let Some(ti) = &self.token_info {
             (&ti.total_token_usage, Some(&ti.last_token_usage))
@@ -2064,11 +2362,149 @@ impl ChatWidget {
             total_usage,
             context_usage,
             &self.conversation_id,
+            show_rate_limits,
             self.rate_limit_snapshot.as_ref(),
             self.plan_type,
             Local::now(),
             self.model_family.get_model_slug(),
         ));
+        self.add_multi_workspace_status_output();
+    }
+
+    fn add_multi_workspace_status_output(&mut self) {
+        let Some(auth) = self.auth_manager.auth() else {
+            return;
+        };
+        if auth.mode != AuthMode::ChatGPT {
+            return;
+        }
+
+        let credentials = self.auth_manager.list_chatgpt_credentials();
+        if credentials.is_empty() {
+            return;
+        }
+
+        let active_id = self.auth_manager.active_chatgpt_credential_id();
+        let base_url = self.config.chatgpt_base_url.clone();
+        let app_event_tx = self.app_event_tx.clone();
+        let auth_manager = Arc::clone(&self.auth_manager);
+
+        tokio::spawn(async move {
+            let now = Local::now();
+            let mut workspaces: Vec<WorkspaceStatusEntry> = Vec::with_capacity(credentials.len());
+
+            for entry in credentials {
+                let Some(entry_auth) =
+                    auth.with_chatgpt_token_data(entry.tokens.clone(), entry.last_refresh)
+                else {
+                    continue;
+                };
+
+                let mut status_entry = WorkspaceStatusEntry {
+                    id: entry.id,
+                    name: entry.name.clone(),
+                    is_active: Some(entry.id) == active_id,
+                    rate_limits: None,
+                    unusable_message: None,
+                    fetch_error: None,
+                };
+
+                match BackendClient::from_auth(base_url.clone(), &entry_auth).await {
+                    Ok(client) => match client.get_rate_limits().await {
+                        Ok(snapshot) => {
+                            let is_exhausted = snapshot
+                                .primary
+                                .as_ref()
+                                .is_some_and(|w| w.used_percent == 100.0)
+                                || snapshot
+                                    .secondary
+                                    .as_ref()
+                                    .is_some_and(|w| w.used_percent == 100.0);
+
+                            if is_exhausted {
+                                let resets_at = snapshot
+                                    .primary
+                                    .as_ref()
+                                    .and_then(|w| w.resets_at)
+                                    .and_then(|s| {
+                                        chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0)
+                                    })
+                                    .or_else(|| {
+                                        snapshot
+                                            .secondary
+                                            .as_ref()
+                                            .and_then(|w| w.resets_at)
+                                            .and_then(|s| {
+                                                chrono::DateTime::<chrono::Utc>::from_timestamp(
+                                                    s, 0,
+                                                )
+                                            })
+                                    });
+
+                                let message = codex_core::error::format_usage_limit_reached_message(
+                                    snapshot.plan_type,
+                                    resets_at,
+                                );
+
+                                let transitioned = auth_manager
+                                    .record_credential_exhausted(entry.id, message.clone());
+                                status_entry.unusable_message = Some(message);
+
+                                if transitioned {
+                                    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                        history_cell::new_info_event(
+                                            format!(
+                                                "Credential #{id} is out of quota. Run /status for details.",
+                                                id = entry.id
+                                            ),
+                                            None,
+                                        ),
+                                    )));
+                                }
+                            } else {
+                                auth_manager.record_credential_available(entry.id);
+                            }
+
+                            status_entry.rate_limits =
+                                Some(crate::status::rate_limit_snapshot_display(&snapshot, now));
+                        }
+                        Err(err) => {
+                            let msg = err.to_string();
+                            if msg.contains("usageNotIncluded")
+                                || msg.contains("usage_not_included")
+                            {
+                                let message = codex_core::error::usage_not_included_message();
+                                let transitioned = auth_manager
+                                    .record_credential_not_included(entry.id, message.clone());
+                                status_entry.unusable_message = Some(message);
+                                if transitioned {
+                                    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                        history_cell::new_info_event(
+                                            format!(
+                                                "Credential #{id} is not included in your plan. Run /status for details.",
+                                                id = entry.id
+                                            ),
+                                            None,
+                                        ),
+                                    )));
+                                }
+                            } else {
+                                status_entry.fetch_error = Some(msg);
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        status_entry.fetch_error = Some(err.to_string());
+                    }
+                }
+
+                workspaces.push(status_entry);
+            }
+
+            app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                crate::status::new_multi_workspace_status_output(workspaces, now),
+            )));
+        });
     }
     fn stop_rate_limit_poller(&mut self) {
         if let Some(handle) = self.rate_limit_poller.take() {
@@ -2086,14 +2522,113 @@ impl ChatWidget {
             return;
         }
 
+        let run_startup_credential_scan = self.startup_credential_scan_pending;
+        self.startup_credential_scan_pending = false;
+
         let base_url = self.config.chatgpt_base_url.clone();
         let app_event_tx = self.app_event_tx.clone();
+        let auth_manager = Arc::clone(&self.auth_manager);
 
         let handle = tokio::spawn(async move {
+            async fn startup_credential_scan(
+                auth: &CodexAuth,
+                auth_manager: &Arc<AuthManager>,
+                base_url: &String,
+                app_event_tx: &AppEventSender,
+            ) {
+                // Startup: pick the first usable credential (by id) when multiple are stored.
+                // If we cannot determine usability (network errors, etc.), assume usable and select
+                // the first candidate to avoid blocking startup.
+                let mut entries = auth_manager.list_chatgpt_credentials();
+                entries.sort_by_key(|entry| entry.id);
+
+                for entry in entries {
+                    let Some(entry_auth) =
+                        auth.with_chatgpt_token_data(entry.tokens.clone(), entry.last_refresh)
+                    else {
+                        continue;
+                    };
+
+                    match BackendClient::from_auth(base_url.clone(), &entry_auth).await {
+                        Ok(client) => match client.get_rate_limits().await {
+                            Ok(snapshot) => {
+                                if ChatWidget::rate_limits_exhausted(&snapshot) {
+                                    let resets_at = ChatWidget::rate_limits_resets_at(&snapshot);
+                                    let message =
+                                        codex_core::error::format_usage_limit_reached_message(
+                                            snapshot.plan_type,
+                                            resets_at,
+                                        );
+                                    let transitioned =
+                                        auth_manager.record_credential_exhausted(entry.id, message);
+                                    if transitioned {
+                                        app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                            history_cell::new_info_event(
+                                                format!(
+                                                    "Credential #{id} is out of quota. Run /status for details.",
+                                                    id = entry.id
+                                                ),
+                                                None,
+                                            ),
+                                        )));
+                                    }
+                                    continue;
+                                }
+
+                                auth_manager.record_credential_available(entry.id);
+                                if auth_manager.active_chatgpt_credential_id() != Some(entry.id) {
+                                    let _ = auth_manager.activate_chatgpt_credential(entry.id);
+                                }
+                                break;
+                            }
+                            Err(err) => {
+                                let msg = err.to_string();
+                                if msg.contains("usageNotIncluded")
+                                    || msg.contains("usage_not_included")
+                                {
+                                    let message = codex_core::error::usage_not_included_message();
+                                    let transitioned = auth_manager
+                                        .record_credential_not_included(entry.id, message);
+                                    if transitioned {
+                                        app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                            history_cell::new_info_event(
+                                                format!(
+                                                    "Credential #{id} is not included in your plan. Run /status for details.",
+                                                    id = entry.id
+                                                ),
+                                                None,
+                                            ),
+                                        )));
+                                    }
+                                    continue;
+                                }
+
+                                // Unknown failure -> treat as usable and stop scanning.
+                                let _ = auth_manager.activate_chatgpt_credential(entry.id);
+                                break;
+                            }
+                        },
+                        Err(_) => {
+                            // Unknown failure -> treat as usable and stop scanning.
+                            let _ = auth_manager.activate_chatgpt_credential(entry.id);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let credentials = auth_manager.list_chatgpt_credentials();
+            if run_startup_credential_scan && credentials.len() > 1 {
+                startup_credential_scan(&auth, &auth_manager, &base_url, &app_event_tx).await;
+            }
+
             let mut interval = tokio::time::interval(Duration::from_secs(60));
 
             loop {
-                if let Some(snapshot) = fetch_rate_limits(base_url.clone(), auth.clone()).await {
+                if let Some(auth) = auth_manager.auth()
+                    && auth.mode == AuthMode::ChatGPT
+                    && let Some(snapshot) = fetch_rate_limits(base_url.clone(), auth).await
+                {
                     app_event_tx.send(AppEvent::RateLimitSnapshotFetched(snapshot));
                 }
                 interval.tick().await;

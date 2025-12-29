@@ -20,6 +20,30 @@ use crate::token_data::TokenData;
 use codex_keyring_store::DefaultKeyringStore;
 use codex_keyring_store::KeyringStore;
 
+/// Multi-credential store for ChatGPT workspaces (file mode).
+///
+/// This is a fork-specific extension that allows storing multiple ChatGPT
+/// credentials in a single `auth.json`. The legacy single-credential fields
+/// (`tokens`/`last_refresh`) are still supported for backwards compatibility.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
+pub struct CredentialsDotJson {
+    #[serde(default)]
+    pub entries: Vec<CredentialEntryDotJson>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct CredentialEntryDotJson {
+    pub id: u32,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    pub tokens: TokenData,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh: Option<DateTime<Utc>>,
+}
+
 /// Determine where Codex should store CLI auth credentials.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,6 +68,10 @@ pub struct AuthDotJson {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_refresh: Option<DateTime<Utc>>,
+
+    /// Multi-workspace ChatGPT credentials store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<CredentialsDotJson>,
 }
 
 pub(super) fn get_auth_file(codex_home: &Path) -> PathBuf {
@@ -298,6 +326,7 @@ mod tests {
             openai_api_key: Some("test-key".to_string()),
             tokens: None,
             last_refresh: Some(Utc::now()),
+            credentials: None,
         };
 
         storage
@@ -317,6 +346,7 @@ mod tests {
             openai_api_key: Some("test-key".to_string()),
             tokens: None,
             last_refresh: Some(Utc::now()),
+            credentials: None,
         };
 
         let file = get_auth_file(codex_home.path());
@@ -338,6 +368,7 @@ mod tests {
             openai_api_key: Some("sk-test-key".to_string()),
             tokens: None,
             last_refresh: None,
+            credentials: None,
         };
         let storage = create_auth_storage(dir.path().to_path_buf(), AuthCredentialsStoreMode::File);
         storage.save(&auth_dot_json)?;
@@ -432,6 +463,7 @@ mod tests {
                 account_id: Some(format!("{prefix}-account-id")),
             }),
             last_refresh: None,
+            credentials: None,
         }
     }
 
@@ -447,6 +479,7 @@ mod tests {
             openai_api_key: Some("sk-test".to_string()),
             tokens: None,
             last_refresh: None,
+            credentials: None,
         };
         seed_keyring_with_auth(
             &mock_keyring,
@@ -488,6 +521,7 @@ mod tests {
                 account_id: Some("account".to_string()),
             }),
             last_refresh: Some(Utc::now()),
+            credentials: None,
         };
 
         storage.save(&auth)?;
