@@ -2343,6 +2343,9 @@ impl ChatWidget {
     }
 
     pub(crate) fn add_status_output(&mut self) {
+        // When multiple ChatGPT credentials are stored, we render per-workspace limits in the
+        // dedicated Workspaces section; keep the status card rate limits only for API key mode
+        // or when there is a single stored ChatGPT credential (legacy behavior).
         let show_rate_limits = self
             .auth_manager
             .auth()
