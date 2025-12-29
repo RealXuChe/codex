@@ -1375,7 +1375,7 @@ impl AuthManager {
     pub fn auth(&self) -> Option<Auth> {
         let auth = self.inner.read().ok().and_then(|c| c.auth.clone())?;
         match auth.mode {
-            AuthMode::ApiKey => auth.api_key.clone().map(|api_key| Auth::ApiKey { api_key }),
+            AuthMode::ApiKey => auth.api_key.map(|api_key| Auth::ApiKey { api_key }),
             AuthMode::ChatGPT => Some(Auth::ChatGpt { handle: auth }),
         }
     }
