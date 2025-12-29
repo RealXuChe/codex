@@ -42,6 +42,21 @@ use std::collections::HashMap;
 use tempfile::TempDir;
 use thiserror::Error;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CredentialKey {
+    pub account_id: String,
+    pub chatgpt_user_id: String,
+}
+
+impl CredentialKey {
+    fn for_entry(entry: &CredentialEntryDotJson) -> Option<Self> {
+        Some(Self {
+            account_id: entry.tokens.account_id.clone()?,
+            chatgpt_user_id: entry.tokens.id_token.chatgpt_user_id.clone()?,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CodexAuth {
     pub mode: AuthMode,
@@ -731,7 +746,7 @@ struct CachedAuth {
     auth: Option<CodexAuth>,
     chatgpt_credentials: Option<CredentialsDotJson>,
     active_chatgpt_credential_id: Option<u32>,
-    credential_status: HashMap<u32, CredentialKnownStatus>,
+    credential_status: HashMap<CredentialKey, CredentialKnownStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1521,7 +1536,13 @@ impl AuthManager {
         for offset in 0..ids.len() {
             let idx = (start_idx + offset) % ids.len();
             let id = ids[idx];
-            match cached.credential_status.get(&id) {
+            let status = store
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(CredentialKey::for_entry)
+                .and_then(|key| cached.credential_status.get(&key));
+            match status {
                 Some(CredentialKnownStatus::Exhausted { .. })
                 | Some(CredentialKnownStatus::NotIncluded { .. }) => {}
                 _ => return Some(id),
@@ -1533,9 +1554,17 @@ impl AuthManager {
 
     pub fn record_credential_available(&self, id: u32) {
         if let Ok(mut guard) = self.inner.write() {
+            let Some(key) = guard
+                .chatgpt_credentials
+                .as_ref()
+                .and_then(|store| store.entries.iter().find(|entry| entry.id == id))
+                .and_then(CredentialKey::for_entry)
+            else {
+                return;
+            };
             guard
                 .credential_status
-                .insert(id, CredentialKnownStatus::Available);
+                .insert(key, CredentialKnownStatus::Available);
         }
     }
 
@@ -1552,12 +1581,20 @@ impl AuthManager {
             return false;
         };
 
+        let Some(key) = guard
+            .chatgpt_credentials
+            .as_ref()
+            .and_then(|store| store.entries.iter().find(|entry| entry.id == id))
+            .and_then(CredentialKey::for_entry)
+        else {
+            return false;
+        };
         let prev = guard
             .credential_status
-            .get(&id)
+            .get(&key)
             .cloned()
             .unwrap_or(CredentialKnownStatus::Unknown);
-        guard.credential_status.insert(id, status);
+        guard.credential_status.insert(key, status);
 
         matches!(
             prev,
