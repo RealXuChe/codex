@@ -10,6 +10,7 @@ pub use cli::Cli;
 use anyhow::anyhow;
 use chrono::Utc;
 use codex_cloud_tasks_client::TaskStatus;
+use codex_core::auth::Auth;
 use codex_login::AuthManager;
 use owo_colors::OwoColorize;
 use owo_colors::Stream;
@@ -66,7 +67,13 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
 
     let auth_manager = util::load_auth_manager().await;
     let auth = match auth_manager.as_ref().and_then(AuthManager::auth) {
-        Some(auth) => auth,
+        Some(Auth::ChatGpt { handle }) => handle,
+        Some(Auth::ApiKey { .. }) => {
+            eprintln!(
+                "Not signed in. Please run 'codex login' to sign in with ChatGPT, then re-run 'codex cloud'."
+            );
+            std::process::exit(1);
+        }
         None => {
             eprintln!(
                 "Not signed in. Please run 'codex login' to sign in with ChatGPT, then re-run 'codex cloud'."

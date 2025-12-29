@@ -4,6 +4,7 @@ use chrono::Local;
 use chrono::Utc;
 use reqwest::header::HeaderMap;
 
+use codex_core::auth::Auth;
 use codex_core::config::Config;
 use codex_login::AuthManager;
 
@@ -85,7 +86,7 @@ pub async fn build_chatgpt_headers() -> HeaderMap {
         HeaderValue::from_str(&ua).unwrap_or(HeaderValue::from_static("codex-cli")),
     );
     if let Some(am) = load_auth_manager().await
-        && let Some(auth) = am.auth()
+        && let Some(Auth::ChatGpt { handle: auth }) = am.auth()
         && let Ok(tok) = auth.get_token().await
         && !tok.is_empty()
     {
