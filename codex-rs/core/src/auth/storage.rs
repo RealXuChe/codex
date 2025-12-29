@@ -128,20 +128,26 @@ impl AuthStorageBackend for FileAuthStorage {
 
     fn save(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
         let auth_file = get_auth_file(&self.codex_home);
+        let tmp_auth_file = auth_file.with_extension("json.tmp");
 
         if let Some(parent) = auth_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json_data = serde_json::to_string_pretty(auth_dot_json)?;
+
         let mut options = OpenOptions::new();
         options.truncate(true).write(true).create(true);
         #[cfg(unix)]
         {
             options.mode(0o600);
         }
-        let mut file = options.open(auth_file)?;
+
+        let mut file = options.open(&tmp_auth_file)?;
         file.write_all(json_data.as_bytes())?;
         file.flush()?;
+        std::fs::rename(&tmp_auth_file, &auth_file).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp_auth_file);
+        })?;
         Ok(())
     }
 
