@@ -44,6 +44,7 @@ fn start_mock_issuer(chatgpt_account_id: &str) -> (SocketAddr, thread::JoinHandl
                     "https://api.openai.com/auth": {
                         "chatgpt_plan_type": "pro",
                         "chatgpt_account_id": chatgpt_account_id,
+                        "chatgpt_user_id": "user-123",
                     }
                 });
                 let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);

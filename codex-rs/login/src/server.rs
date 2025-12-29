@@ -554,15 +554,16 @@ pub(crate) async fn persist_tokens_async(
             refresh_token,
             account_id: None,
         };
-        if let Some(acc) = jwt_auth_claims(&id_token)
-            .get("chatgpt_account_id")
-            .and_then(|v| v.as_str())
-        {
-            tokens.account_id = Some(acc.to_string());
+        if tokens.account_id.is_none() {
+            tokens.account_id = tokens.id_token.chatgpt_account_id.clone();
         }
 
         let account_id = tokens.account_id.as_deref().ok_or_else(|| {
             io::Error::other("ChatGPT login succeeded but account_id is missing.")
+        })?;
+
+        let chatgpt_user_id = tokens.id_token.chatgpt_user_id.as_deref().ok_or_else(|| {
+            io::Error::other("ChatGPT login succeeded but chatgpt_user_id is missing.")
         })?;
 
         let mut auth =
@@ -589,12 +590,11 @@ pub(crate) async fn persist_tokens_async(
         }
 
         let now = Utc::now();
-        if let Some(existing) = store
-            .entries
-            .iter_mut()
-            .find(|entry| entry.tokens.account_id.as_deref() == Some(account_id))
-        {
-            // Same account_id: refresh token contents in-place, keep name and id.
+        if let Some(existing) = store.entries.iter_mut().find(|entry| {
+            entry.tokens.account_id.as_deref() == Some(account_id)
+                && entry.tokens.id_token.chatgpt_user_id.as_deref() == Some(chatgpt_user_id)
+        }) {
+            // Same (account_id, chatgpt_user_id): refresh token contents in-place, keep name and id.
             existing.tokens = tokens;
             existing.last_refresh = Some(now);
         } else {
