@@ -2378,7 +2378,7 @@ impl ChatWidget {
         let Some(auth) = self.auth_manager.auth() else {
             return;
         };
-        let Auth::ChatGpt { handle: auth } = auth else {
+        let Auth::ChatGpt { .. } = auth else {
             return;
         };
 
@@ -2397,9 +2397,7 @@ impl ChatWidget {
             let mut workspaces: Vec<WorkspaceStatusEntry> = Vec::with_capacity(credentials.len());
 
             for entry in credentials {
-                let Some(entry_auth) =
-                    auth.with_chatgpt_token_data(entry.tokens.clone(), entry.last_refresh)
-                else {
+                let Some(entry_auth) = auth_manager.chatgpt_auth_for_credential_id(entry.id) else {
                     continue;
                 };
 
@@ -2415,35 +2413,8 @@ impl ChatWidget {
                 match BackendClient::from_auth(base_url.clone(), &entry_auth).await {
                     Ok(client) => match client.get_rate_limits().await {
                         Ok(snapshot) => {
-                            let is_exhausted = snapshot
-                                .primary
-                                .as_ref()
-                                .is_some_and(|w| w.used_percent == 100.0)
-                                || snapshot
-                                    .secondary
-                                    .as_ref()
-                                    .is_some_and(|w| w.used_percent == 100.0);
-
-                            if is_exhausted {
-                                let resets_at = snapshot
-                                    .primary
-                                    .as_ref()
-                                    .and_then(|w| w.resets_at)
-                                    .and_then(|s| {
-                                        chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0)
-                                    })
-                                    .or_else(|| {
-                                        snapshot
-                                            .secondary
-                                            .as_ref()
-                                            .and_then(|w| w.resets_at)
-                                            .and_then(|s| {
-                                                chrono::DateTime::<chrono::Utc>::from_timestamp(
-                                                    s, 0,
-                                                )
-                                            })
-                                    });
-
+                            if ChatWidget::rate_limits_exhausted(&snapshot) {
+                                let resets_at = ChatWidget::rate_limits_resets_at(&snapshot);
                                 let message = codex_core::error::format_usage_limit_reached_message(
                                     snapshot.plan_type,
                                     resets_at,
@@ -2521,7 +2492,7 @@ impl ChatWidget {
         let Some(auth) = self.auth_manager.auth() else {
             return;
         };
-        let Auth::ChatGpt { handle: auth } = auth else {
+        let Auth::ChatGpt { .. } = auth else {
             return;
         };
 
@@ -2534,9 +2505,8 @@ impl ChatWidget {
 
         let handle = tokio::spawn(async move {
             async fn startup_credential_scan(
-                auth: &CodexAuth,
                 auth_manager: &Arc<AuthManager>,
-                base_url: &String,
+                base_url: &str,
                 app_event_tx: &AppEventSender,
             ) {
                 // Startup: pick the first usable credential (by id) when multiple are stored.
@@ -2546,13 +2516,12 @@ impl ChatWidget {
                 entries.sort_by_key(|entry| entry.id);
 
                 for entry in entries {
-                    let Some(entry_auth) =
-                        auth.with_chatgpt_token_data(entry.tokens.clone(), entry.last_refresh)
+                    let Some(entry_auth) = auth_manager.chatgpt_auth_for_credential_id(entry.id)
                     else {
                         continue;
                     };
 
-                    match BackendClient::from_auth(base_url.clone(), &entry_auth).await {
+                    match BackendClient::from_auth(base_url.to_owned(), &entry_auth).await {
                         Ok(client) => match client.get_rate_limits().await {
                             Ok(snapshot) => {
                                 if ChatWidget::rate_limits_exhausted(&snapshot) {
@@ -2622,7 +2591,7 @@ impl ChatWidget {
 
             let credentials = auth_manager.list_chatgpt_credentials();
             if run_startup_credential_scan && credentials.len() > 1 {
-                startup_credential_scan(&auth, &auth_manager, &base_url, &app_event_tx).await;
+                startup_credential_scan(&auth_manager, base_url.as_str(), &app_event_tx).await;
             }
 
             let mut interval = tokio::time::interval(Duration::from_secs(60));

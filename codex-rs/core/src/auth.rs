@@ -750,7 +750,6 @@ use std::sync::RwLock;
 #[derive(Clone, Debug)]
 struct CachedAuth {
     auth: Option<CodexAuth>,
-    chatgpt_credentials: Option<CredentialsDotJson>,
     active_chatgpt_credential_id: Option<u32>,
     credential_status: HashMap<CredentialKey, CredentialKnownStatus>,
 }
@@ -1220,7 +1219,6 @@ impl AuthManager {
                     api_key.as_str(),
                     client,
                 )),
-                chatgpt_credentials: None,
                 active_chatgpt_credential_id: None,
                 credential_status: HashMap::new(),
             });
@@ -1233,7 +1231,6 @@ impl AuthManager {
             None => {
                 return Ok(CachedAuth {
                     auth: None,
-                    chatgpt_credentials: None,
                     active_chatgpt_credential_id: None,
                     credential_status: HashMap::new(),
                 });
@@ -1244,7 +1241,6 @@ impl AuthManager {
         if let Some(api_key) = auth_dot_json.openai_api_key.as_ref() {
             return Ok(CachedAuth {
                 auth: Some(CodexAuth::from_api_key_with_client(api_key, client)),
-                chatgpt_credentials: None,
                 active_chatgpt_credential_id: None,
                 credential_status: HashMap::new(),
             });
@@ -1303,7 +1299,6 @@ impl AuthManager {
 
         Ok(CachedAuth {
             auth,
-            chatgpt_credentials: credentials,
             active_chatgpt_credential_id: active_id,
             credential_status: HashMap::new(),
         })
@@ -1326,7 +1321,6 @@ impl AuthManager {
         )
         .unwrap_or(CachedAuth {
             auth: None,
-            chatgpt_credentials: None,
             active_chatgpt_credential_id: None,
             credential_status: HashMap::new(),
         });
@@ -1344,7 +1338,6 @@ impl AuthManager {
     pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
         let cached = CachedAuth {
             auth: Some(auth),
-            chatgpt_credentials: None,
             active_chatgpt_credential_id: None,
             credential_status: HashMap::new(),
         };
@@ -1367,7 +1360,6 @@ impl AuthManager {
     pub fn from_auth_for_testing_with_home(auth: CodexAuth, codex_home: PathBuf) -> Arc<Self> {
         let cached = CachedAuth {
             auth: Some(auth),
-            chatgpt_credentials: None,
             active_chatgpt_credential_id: None,
             credential_status: HashMap::new(),
         };
@@ -1410,7 +1402,6 @@ impl AuthManager {
         .ok()
         .unwrap_or(CachedAuth {
             auth: None,
-            chatgpt_credentials: None,
             active_chatgpt_credential_id: None,
             credential_status: HashMap::new(),
         });
@@ -1418,7 +1409,6 @@ impl AuthManager {
         if let Ok(mut guard) = self.inner.write() {
             let changed = !AuthManager::auths_equal(&guard.auth, &new_cached.auth);
             guard.auth = new_cached.auth;
-            guard.chatgpt_credentials = new_cached.chatgpt_credentials;
             guard.active_chatgpt_credential_id = new_cached.active_chatgpt_credential_id;
             changed
         } else {
@@ -1490,12 +1480,32 @@ impl AuthManager {
     }
 
     pub fn list_chatgpt_credentials(&self) -> Vec<CredentialEntryDotJson> {
-        self.inner
-            .read()
-            .ok()
-            .and_then(|cached| cached.chatgpt_credentials.clone())
+        let Some(auth) = self.auth() else {
+            return Vec::new();
+        };
+        let Auth::ChatGpt { handle: auth } = auth else {
+            return Vec::new();
+        };
+        auth.get_current_auth_json()
+            .and_then(|auth_dot_json| auth_dot_json.credentials)
             .map(|store| store.entries)
             .unwrap_or_default()
+    }
+
+    /// Returns a ChatGPT auth handle for a specific stored credential id without mutating
+    /// the process-wide active credential.
+    pub fn chatgpt_auth_for_credential_id(&self, id: u32) -> Option<CodexAuth> {
+        let auth = self.auth()?;
+        let Auth::ChatGpt { handle: auth } = auth else {
+            return None;
+        };
+
+        let entry = auth
+            .get_current_auth_json()
+            .and_then(|auth_dot_json| auth_dot_json.credentials)
+            .and_then(|store| store.entries.into_iter().find(|entry| entry.id == id))?;
+
+        auth.with_chatgpt_token_data(entry.tokens, entry.last_refresh)
     }
 
     pub fn active_chatgpt_credential_id(&self) -> Option<u32> {
@@ -1506,36 +1516,47 @@ impl AuthManager {
     }
 
     pub fn activate_chatgpt_credential(&self, id: u32) -> std::io::Result<()> {
-        let new_cached = AuthManager::load_cached_auth(
-            &self.codex_home,
-            self.enable_codex_api_key_env,
-            self.auth_credentials_store_mode,
-            Some(id),
-        )?;
+        let Ok(mut guard) = self.inner.write() else {
+            return Err(std::io::Error::other("failed to lock auth manager"));
+        };
+        let Some(auth) = guard.auth.as_ref() else {
+            return Err(std::io::Error::other("Not logged in."));
+        };
+        if auth.mode != AuthMode::ChatGPT {
+            return Err(std::io::Error::other(
+                "ChatGPT authentication required to activate a credential.",
+            ));
+        }
 
-        let has_id = new_cached
-            .chatgpt_credentials
-            .as_ref()
-            .is_some_and(|store| store.entries.iter().any(|entry| entry.id == id));
-        if !has_id {
+        let Some(mut auth_dot_json) = auth.get_current_auth_json() else {
+            return Err(std::io::Error::other("Token data is not available."));
+        };
+        let Some(store) = auth_dot_json.credentials.as_ref() else {
+            return Err(std::io::Error::other("No ChatGPT credentials found."));
+        };
+        let Some(entry) = store.entries.iter().find(|entry| entry.id == id) else {
             return Err(std::io::Error::other(format!(
                 "Unknown credential id: {id}"
             )));
-        }
+        };
 
-        if let Ok(mut guard) = self.inner.write() {
-            let previous_status = guard.credential_status.clone();
-            *guard = CachedAuth {
-                credential_status: previous_status,
-                ..new_cached
-            };
+        auth_dot_json.tokens = Some(entry.tokens.clone());
+        auth_dot_json.last_refresh = entry.last_refresh;
+
+        if let Ok(mut auth_lock) = auth.auth_dot_json.lock() {
+            *auth_lock = Some(auth_dot_json);
         }
+        guard.active_chatgpt_credential_id = Some(id);
         Ok(())
     }
 
     pub fn next_chatgpt_candidate_credential_id(&self, after: Option<u32>) -> Option<u32> {
         let cached = self.inner.read().ok()?;
-        let store = cached.chatgpt_credentials.as_ref()?;
+        let auth = cached.auth.as_ref()?;
+        if auth.mode != AuthMode::ChatGPT {
+            return None;
+        }
+        let store = auth.get_current_auth_json()?.credentials?;
         if store.entries.is_empty() {
             return None;
         }
@@ -1569,10 +1590,19 @@ impl AuthManager {
 
     pub fn record_credential_available(&self, id: u32) {
         if let Ok(mut guard) = self.inner.write() {
-            let Some(key) = guard
-                .chatgpt_credentials
-                .as_ref()
-                .and_then(|store| store.entries.iter().find(|entry| entry.id == id))
+            let Some(auth) = guard.auth.as_ref() else {
+                return;
+            };
+            let Some(store) = auth
+                .get_current_auth_json()
+                .and_then(|auth_dot_json| auth_dot_json.credentials)
+            else {
+                return;
+            };
+            let Some(key) = store
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
                 .and_then(CredentialKey::for_entry)
             else {
                 return;
@@ -1596,10 +1626,19 @@ impl AuthManager {
             return false;
         };
 
-        let Some(key) = guard
-            .chatgpt_credentials
-            .as_ref()
-            .and_then(|store| store.entries.iter().find(|entry| entry.id == id))
+        let Some(auth) = guard.auth.as_ref() else {
+            return false;
+        };
+        let Some(store) = auth
+            .get_current_auth_json()
+            .and_then(|auth_dot_json| auth_dot_json.credentials)
+        else {
+            return false;
+        };
+        let Some(key) = store
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
             .and_then(CredentialKey::for_entry)
         else {
             return false;
