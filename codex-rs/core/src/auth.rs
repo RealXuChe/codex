@@ -752,6 +752,7 @@ struct CachedAuth {
     auth: Option<CodexAuth>,
     active_chatgpt_credential_id: Option<u32>,
     credential_status: HashMap<CredentialKey, CredentialKnownStatus>,
+    auth_load_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1187,6 +1188,24 @@ mod tests {
 
         pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::Unknown));
     }
+
+    #[test]
+    fn auth_manager_exposes_load_error_when_auth_file_is_corrupt() {
+        let codex_home = tempdir().unwrap();
+        std::fs::write(codex_home.path().join("auth.json"), "{not-json").unwrap();
+
+        let auth_manager = AuthManager::new(
+            codex_home.path().to_path_buf(),
+            false,
+            AuthCredentialsStoreMode::File,
+        );
+
+        assert!(auth_manager.auth().is_none());
+        assert!(
+            auth_manager.auth_load_error().is_some(),
+            "auth manager should expose a load error"
+        );
+    }
 }
 
 /// Central manager providing a single source of truth for auth.json derived
@@ -1221,6 +1240,7 @@ impl AuthManager {
                 )),
                 active_chatgpt_credential_id: None,
                 credential_status: HashMap::new(),
+                auth_load_error: None,
             });
         }
 
@@ -1233,6 +1253,7 @@ impl AuthManager {
                     auth: None,
                     active_chatgpt_credential_id: None,
                     credential_status: HashMap::new(),
+                    auth_load_error: None,
                 });
             }
         };
@@ -1243,6 +1264,7 @@ impl AuthManager {
                 auth: Some(CodexAuth::from_api_key_with_client(api_key, client)),
                 active_chatgpt_credential_id: None,
                 credential_status: HashMap::new(),
+                auth_load_error: None,
             });
         }
 
@@ -1301,6 +1323,7 @@ impl AuthManager {
             auth,
             active_chatgpt_credential_id: active_id,
             credential_status: HashMap::new(),
+            auth_load_error: None,
         })
     }
 
@@ -1313,17 +1336,27 @@ impl AuthManager {
         enable_codex_api_key_env: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
     ) -> Self {
-        let cached = AuthManager::load_cached_auth(
+        let cached = match AuthManager::load_cached_auth(
             &codex_home,
             enable_codex_api_key_env,
             auth_credentials_store_mode,
             None,
-        )
-        .unwrap_or(CachedAuth {
-            auth: None,
-            active_chatgpt_credential_id: None,
-            credential_status: HashMap::new(),
-        });
+        ) {
+            Ok(cached) => cached,
+            Err(err) => {
+                let auth_path = crate::auth::storage::get_auth_file(&codex_home);
+                tracing::error!(
+                    "failed to load auth.json; treating as unauthenticated (auth file: {}): {err}",
+                    auth_path.display()
+                );
+                CachedAuth {
+                    auth: None,
+                    active_chatgpt_credential_id: None,
+                    credential_status: HashMap::new(),
+                    auth_load_error: Some(err.to_string()),
+                }
+            }
+        };
         Self {
             codex_home,
             inner: RwLock::new(cached),
@@ -1340,6 +1373,7 @@ impl AuthManager {
             auth: Some(auth),
             active_chatgpt_credential_id: None,
             credential_status: HashMap::new(),
+            auth_load_error: None,
         };
         let temp_dir = tempfile::tempdir().expect("temp codex home");
         let codex_home = temp_dir.path().to_path_buf();
@@ -1362,6 +1396,7 @@ impl AuthManager {
             auth: Some(auth),
             active_chatgpt_credential_id: None,
             credential_status: HashMap::new(),
+            auth_load_error: None,
         };
         Arc::new(Self {
             codex_home,
@@ -1393,27 +1428,45 @@ impl AuthManager {
             .ok()
             .and_then(|cached| cached.active_chatgpt_credential_id);
 
-        let new_cached = AuthManager::load_cached_auth(
+        let new_cached = match AuthManager::load_cached_auth(
             &self.codex_home,
             self.enable_codex_api_key_env,
             self.auth_credentials_store_mode,
             preferred_active_id,
-        )
-        .ok()
-        .unwrap_or(CachedAuth {
-            auth: None,
-            active_chatgpt_credential_id: None,
-            credential_status: HashMap::new(),
-        });
+        ) {
+            Ok(cached) => cached,
+            Err(err) => {
+                let auth_path = crate::auth::storage::get_auth_file(&self.codex_home);
+                tracing::error!(
+                    "failed to load auth.json; treating as unauthenticated (auth file: {}): {err}",
+                    auth_path.display()
+                );
+                CachedAuth {
+                    auth: None,
+                    active_chatgpt_credential_id: None,
+                    credential_status: HashMap::new(),
+                    auth_load_error: Some(err.to_string()),
+                }
+            }
+        };
 
         if let Ok(mut guard) = self.inner.write() {
             let changed = !AuthManager::auths_equal(&guard.auth, &new_cached.auth);
             guard.auth = new_cached.auth;
             guard.active_chatgpt_credential_id = new_cached.active_chatgpt_credential_id;
+            guard.auth_load_error = new_cached.auth_load_error;
             changed
         } else {
             false
         }
+    }
+
+    /// If loading `auth.json` failed, returns the last observed error message.
+    pub fn auth_load_error(&self) -> Option<String> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|c| c.auth_load_error.clone())
     }
 
     fn auths_equal(a: &Option<CodexAuth>, b: &Option<CodexAuth>) -> bool {

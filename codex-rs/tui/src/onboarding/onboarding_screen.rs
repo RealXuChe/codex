@@ -84,6 +84,7 @@ impl OnboardingScreen {
         let forced_login_method = config.forced_login_method;
         let codex_home = config.codex_home;
         let cli_auth_credentials_store_mode = config.cli_auth_credentials_store_mode;
+        let auth_load_error = auth_manager.auth_load_error();
         let mut steps: Vec<Step> = Vec::new();
         steps.push(Step::Welcome(WelcomeWidget::new(
             !matches!(login_status, LoginStatus::NotAuthenticated),
@@ -98,7 +99,11 @@ impl OnboardingScreen {
             steps.push(Step::Auth(AuthModeWidget {
                 request_frame: tui.frame_requester(),
                 highlighted_mode,
-                error: None,
+                error: auth_load_error.map(|err| {
+                    format!(
+                        "Failed to read auth.json. Your credentials file may be corrupted.\n\n{err}\n\nYou can fix the file or delete it and sign in again."
+                    )
+                }),
                 sign_in_state: Arc::new(RwLock::new(SignInState::PickMode)),
                 codex_home: codex_home.clone(),
                 cli_auth_credentials_store_mode,
