@@ -7,7 +7,7 @@ use codex_api::rate_limits::parse_rate_limit;
 use http::HeaderMap;
 use serde::Deserialize;
 
-use crate::auth::CodexAuth;
+use crate::auth::Auth;
 use crate::error::CodexErr;
 use crate::error::RetryLimitReachedError;
 use crate::error::UnexpectedResponseError;
@@ -101,7 +101,7 @@ fn extract_request_id(headers: Option<&HeaderMap>) -> Option<String> {
 }
 
 pub(crate) async fn auth_provider_from_auth(
-    auth: Option<CodexAuth>,
+    auth: Option<Auth>,
     provider: &ModelProviderInfo,
 ) -> crate::error::Result<CoreAuthProvider> {
     if let Some(api_key) = provider.api_key()? {
@@ -119,11 +119,19 @@ pub(crate) async fn auth_provider_from_auth(
     }
 
     if let Some(auth) = auth {
-        let token = auth.get_token().await?;
-        Ok(CoreAuthProvider {
-            token: Some(token),
-            account_id: auth.get_account_id(),
-        })
+        match auth {
+            Auth::ApiKey { api_key } => Ok(CoreAuthProvider {
+                token: Some(api_key),
+                account_id: None,
+            }),
+            Auth::ChatGpt { handle } => {
+                let token = handle.get_token().await?;
+                Ok(CoreAuthProvider {
+                    token: Some(token),
+                    account_id: handle.get_account_id(),
+                })
+            }
+        }
     } else {
         Ok(CoreAuthProvider {
             token: None,

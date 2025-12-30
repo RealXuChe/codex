@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use codex_app_server_protocol::AuthMode;
 use codex_backend_client::Client as BackendClient;
 use codex_core::config::Config;
 use codex_core::config::ConstraintResult;
@@ -141,6 +140,7 @@ use codex_common::approval_presets::builtin_approval_presets;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ConversationManager;
+use codex_core::auth::Auth;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_file_search::FileMatch;
@@ -2540,10 +2540,13 @@ impl ChatWidget {
     }
 
     pub(crate) fn add_status_output(&mut self) {
+        // When multiple ChatGPT credentials are stored, we render per-workspace limits in the
+        // dedicated Workspaces section; keep the status card rate limits only for API key mode
+        // or when there is a single stored ChatGPT credential (legacy behavior).
         let show_rate_limits = self
             .auth_manager
             .auth()
-            .is_some_and(|auth| auth.mode != AuthMode::ChatGPT)
+            .is_some_and(|auth| matches!(auth, Auth::ApiKey { .. }))
             || self.auth_manager.list_chatgpt_credentials().len() <= 1;
 
         let default_usage = TokenUsage::default();
@@ -2572,9 +2575,9 @@ impl ChatWidget {
         let Some(auth) = self.auth_manager.auth() else {
             return;
         };
-        if auth.mode != AuthMode::ChatGPT {
+        let Auth::ChatGpt { .. } = auth else {
             return;
-        }
+        };
 
         let credentials = self.auth_manager.list_chatgpt_credentials();
         if credentials.is_empty() {
@@ -2591,9 +2594,7 @@ impl ChatWidget {
             let mut workspaces: Vec<WorkspaceStatusEntry> = Vec::with_capacity(credentials.len());
 
             for entry in credentials {
-                let Some(entry_auth) =
-                    auth.with_chatgpt_token_data(entry.tokens.clone(), entry.last_refresh)
-                else {
+                let Some(entry_auth) = auth_manager.chatgpt_auth_for_credential_id(entry.id) else {
                     continue;
                 };
 
@@ -2609,35 +2610,8 @@ impl ChatWidget {
                 match BackendClient::from_auth(base_url.clone(), &entry_auth).await {
                     Ok(client) => match client.get_rate_limits().await {
                         Ok(snapshot) => {
-                            let is_exhausted = snapshot
-                                .primary
-                                .as_ref()
-                                .is_some_and(|w| w.used_percent == 100.0)
-                                || snapshot
-                                    .secondary
-                                    .as_ref()
-                                    .is_some_and(|w| w.used_percent == 100.0);
-
-                            if is_exhausted {
-                                let resets_at = snapshot
-                                    .primary
-                                    .as_ref()
-                                    .and_then(|w| w.resets_at)
-                                    .and_then(|s| {
-                                        chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0)
-                                    })
-                                    .or_else(|| {
-                                        snapshot
-                                            .secondary
-                                            .as_ref()
-                                            .and_then(|w| w.resets_at)
-                                            .and_then(|s| {
-                                                chrono::DateTime::<chrono::Utc>::from_timestamp(
-                                                    s, 0,
-                                                )
-                                            })
-                                    });
-
+                            if ChatWidget::rate_limits_exhausted(&snapshot) {
+                                let resets_at = ChatWidget::rate_limits_resets_at(&snapshot);
                                 let message = codex_core::error::format_usage_limit_reached_message(
                                     snapshot.plan_type,
                                     resets_at,
@@ -2725,9 +2699,9 @@ impl ChatWidget {
         let Some(auth) = self.auth_manager.auth() else {
             return;
         };
-        if auth.mode != AuthMode::ChatGPT {
+        let Auth::ChatGpt { .. } = auth else {
             return;
-        }
+        };
 
         let run_startup_credential_scan = self.startup_credential_scan_pending;
         self.startup_credential_scan_pending = false;
@@ -2738,9 +2712,8 @@ impl ChatWidget {
 
         let handle = tokio::spawn(async move {
             async fn startup_credential_scan(
-                auth: &CodexAuth,
                 auth_manager: &Arc<AuthManager>,
-                base_url: &String,
+                base_url: &str,
                 app_event_tx: &AppEventSender,
             ) {
                 // Startup: pick the first usable credential (by id) when multiple are stored.
@@ -2750,13 +2723,12 @@ impl ChatWidget {
                 entries.sort_by_key(|entry| entry.id);
 
                 for entry in entries {
-                    let Some(entry_auth) =
-                        auth.with_chatgpt_token_data(entry.tokens.clone(), entry.last_refresh)
+                    let Some(entry_auth) = auth_manager.chatgpt_auth_for_credential_id(entry.id)
                     else {
                         continue;
                     };
 
-                    match BackendClient::from_auth(base_url.clone(), &entry_auth).await {
+                    match BackendClient::from_auth(base_url.to_owned(), &entry_auth).await {
                         Ok(client) => match client.get_rate_limits().await {
                             Ok(snapshot) => {
                                 if ChatWidget::rate_limits_exhausted(&snapshot) {
@@ -2826,14 +2798,14 @@ impl ChatWidget {
 
             let credentials = auth_manager.list_chatgpt_credentials();
             if run_startup_credential_scan && credentials.len() > 1 {
-                startup_credential_scan(&auth, &auth_manager, &base_url, &app_event_tx).await;
+                startup_credential_scan(&auth_manager, base_url.as_str(), &app_event_tx).await;
             }
 
             let mut interval = tokio::time::interval(Duration::from_secs(60));
 
             loop {
                 if let Some(auth) = auth_manager.auth()
-                    && auth.mode == AuthMode::ChatGPT
+                    && let Auth::ChatGpt { handle: auth } = auth
                     && let Some(snapshot) = fetch_rate_limits(base_url.clone(), auth).await
                 {
                     app_event_tx.send(AppEvent::RateLimitSnapshotFetched(snapshot));
