@@ -27,6 +27,22 @@ Alternatively, if you use Homebrew:
 brew install --cask codex
 ```
 
+#### Linux (RealXuChe fork): install nightly/alpha builds from GitHub Releases
+
+This fork publishes Linux binaries to GitHub Releases and includes a small installer/updater script. It installs to `~/.local/bin/codex`.
+
+Nightly (updated on each push to `main`):
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/RealXuChe/codex/main/scripts/install-codex.sh | sh
+```
+
+Latest alpha:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/RealXuChe/codex/main/scripts/install-codex.sh | sh -s -- --channel alpha
+```
+
 Then simply run `codex` to get started:
 
 ```shell
