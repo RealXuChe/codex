@@ -80,7 +80,7 @@ import sys
 release = json.load(sys.stdin)
 assets = release.get("assets", [])
 
-def find_asset(name: str) -> str | None:
+def find_asset(name):
     for asset in assets:
         if asset.get("name") == name:
             return asset.get("browser_download_url")
@@ -121,4 +121,3 @@ case ":${PATH}:" in
     echo "Then restart your shell (or open a new terminal)."
     ;;
 esac
-
