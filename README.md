@@ -20,7 +20,35 @@ Install globally with your preferred package manager:
 npm install -g @openai/codex
 ```
 
-Then simply run `codex` to get started.
+Then simply run `codex` to get started:
+
+```shell
+codex
+```
+
+Alternatively, if you use Homebrew:
+
+```shell
+brew install --cask codex
+```
+
+#### Linux (RealXuChe fork): install nightly/alpha builds from GitHub Releases
+
+This fork publishes Linux binaries to GitHub Releases and includes a small installer/updater script. It installs to `~/.local/bin/codex`.
+
+Nightly (updated on each push to `main`):
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/RealXuChe/codex/main/scripts/install-codex.sh | sh
+```
+
+Latest alpha:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/RealXuChe/codex/main/scripts/install-codex.sh | sh -s -- --channel alpha
+```
+
+If you're running into upgrade issues with Homebrew, see the [FAQ entry on brew upgrade codex](./docs/faq.md#brew-upgrade-codex-isnt-upgrading-me).
 
 <details>
 <summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
