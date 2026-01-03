@@ -547,6 +547,12 @@ pub enum EventMsg {
     /// Agent has started a task
     TaskStarted(TaskStartedEvent),
 
+    /// Agent has started a new model turn within the current task.
+    TurnStarted(TurnStartedEvent),
+
+    /// Agent has committed the current model turn output.
+    TurnCommitted(TurnCommittedEvent),
+
     /// Agent has completed all actions
     TaskComplete(TaskCompleteEvent),
 
@@ -849,6 +855,12 @@ pub struct TaskCompleteEvent {
 pub struct TaskStartedEvent {
     pub model_context_window: Option<i64>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct TurnStartedEvent;
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct TurnCommittedEvent;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, TS)]
 pub struct TokenUsage {
