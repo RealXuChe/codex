@@ -786,8 +786,10 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
 
-                if matches!(&event.msg, EventMsg::TaskComplete(_) | EventMsg::TurnAborted(_))
-                    && self.turn_scrollback_checkpoint.take().is_some()
+                if matches!(
+                    &event.msg,
+                    EventMsg::TaskComplete(_) | EventMsg::TurnAborted(_)
+                ) && self.turn_scrollback_checkpoint.take().is_some()
                 {
                     self.has_emitted_history_lines =
                         self.turn_scrollback_buffer_has_emitted_history_lines;
