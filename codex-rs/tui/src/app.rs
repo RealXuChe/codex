@@ -688,7 +688,7 @@ impl App {
                     // Only insert a separating blank line for new cells that are not
                     // part of an ongoing stream. Streaming continuations should not
                     // accrue extra blank lines between chunks.
-                    if let Some(_) = self.turn_scrollback_checkpoint {
+                    if self.turn_scrollback_checkpoint.is_some() {
                         if !cell.is_stream_continuation() {
                             if self.turn_scrollback_buffer_has_emitted_history_lines {
                                 display.insert(0, Line::from(""));
