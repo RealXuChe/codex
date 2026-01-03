@@ -1612,6 +1612,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::Interrupt => {
                 handlers::interrupt(&sess).await;
             }
+            Op::Continue => {
+                handlers::continue_turn(&sess, sub.id.clone(), &mut previous_context).await;
+            }
             Op::OverrideTurnContext {
                 cwd,
                 approval_policy,
@@ -1811,6 +1814,24 @@ mod handlers {
                 .await;
             *previous_context = Some(current_context);
         }
+    }
+
+    pub async fn continue_turn(
+        sess: &Arc<Session>,
+        sub_id: String,
+        previous_context: &mut Option<Arc<TurnContext>>,
+    ) {
+        let current_context = sess.new_default_turn_with_sub_id(sub_id).await;
+        if let Some(env_item) =
+            sess.build_environment_update_item(previous_context.as_ref(), &current_context)
+        {
+            sess.record_conversation_items(&current_context, std::slice::from_ref(&env_item))
+                .await;
+        }
+
+        sess.spawn_task(Arc::clone(&current_context), Vec::new(), RegularTask)
+            .await;
+        *previous_context = Some(current_context);
     }
 
     pub async fn run_user_shell_command(
@@ -2234,9 +2255,7 @@ pub(crate) async fn run_task(
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
 ) -> Option<String> {
-    if input.is_empty() {
-        return None;
-    }
+    let has_user_input = !input.is_empty();
 
     let auto_compact_limit = turn_context
         .client
@@ -2258,24 +2277,31 @@ pub(crate) async fn run_task(
             .skills_for_cwd(&turn_context.cwd)
     });
 
-    let SkillInjections {
-        items: skill_items,
-        warnings: skill_warnings,
-    } = build_skill_injections(&input, skills_outcome.as_ref()).await;
+    let (skill_items, skill_warnings) = if has_user_input {
+        let SkillInjections {
+            items: skill_items,
+            warnings: skill_warnings,
+        } = build_skill_injections(&input, skills_outcome.as_ref()).await;
+        (skill_items, skill_warnings)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     for message in skill_warnings {
         sess.send_event(&turn_context, EventMsg::Warning(WarningEvent { message }))
             .await;
     }
 
-    let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
-    let response_item: ResponseItem = initial_input_for_turn.clone().into();
-    sess.record_response_item_and_emit_turn_item(turn_context.as_ref(), response_item)
-        .await;
-
-    if !skill_items.is_empty() {
-        sess.record_conversation_items(&turn_context, &skill_items)
+    if has_user_input {
+        let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+        let response_item: ResponseItem = initial_input_for_turn.clone().into();
+        sess.record_response_item_and_emit_turn_item(turn_context.as_ref(), response_item)
             .await;
+
+        if !skill_items.is_empty() {
+            sess.record_conversation_items(&turn_context, &skill_items)
+                .await;
+        }
     }
 
     sess.maybe_start_ghost_snapshot(Arc::clone(&turn_context), cancellation_token.child_token())

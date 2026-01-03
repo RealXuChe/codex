@@ -21,6 +21,7 @@ pub enum SlashCommand {
     Resume,
     Init,
     Compact,
+    Continue,
     // Undo,
     Diff,
     Mention,
@@ -44,6 +45,7 @@ impl SlashCommand {
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
+            SlashCommand::Continue => "start a new turn without a new user message",
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Resume => "resume a saved chat",
             // SlashCommand::Undo => "ask Codex to undo a turn",
@@ -77,6 +79,7 @@ impl SlashCommand {
             | SlashCommand::Resume
             | SlashCommand::Init
             | SlashCommand::Compact
+            | SlashCommand::Continue
             // | SlashCommand::Undo
             | SlashCommand::Model
             | SlashCommand::Approvals

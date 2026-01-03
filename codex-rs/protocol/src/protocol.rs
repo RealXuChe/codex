@@ -70,6 +70,12 @@ pub enum Op {
     /// This server sends [`EventMsg::TurnAborted`] in response.
     Interrupt,
 
+    /// Trigger a new agent turn without adding a new user message.
+    ///
+    /// This is intended for UI commands like `/continue`, where the user wants
+    /// the model to "keep going" based on the current committed history.
+    Continue,
+
     /// Input from the user
     UserInput {
         /// User input items, see `InputItem`
