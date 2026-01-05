@@ -131,6 +131,14 @@ async fn interrupt_tool_records_history_entries() {
     );
 
     assert!(
+        requests[1]
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text == "<event user_interrupt=\"true\"/>"),
+        "expected user interrupt marker to be appended to the next request"
+    );
+
+    assert!(
         response_mock.saw_function_call(call_id),
         "function call not recorded in responses payload"
     );

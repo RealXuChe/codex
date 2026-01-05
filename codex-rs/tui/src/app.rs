@@ -302,6 +302,12 @@ pub(crate) struct App {
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
     pub(crate) deferred_history_lines: Vec<Line<'static>>,
+    /// While a task is running, buffer transcript output so it can be rolled
+    /// back on stream retry and only printed to terminal scrollback once the
+    /// turn commits.
+    turn_scrollback_checkpoint: Option<usize>,
+    turn_scrollback_buffer_has_emitted_history_lines: bool,
+    turn_scrollback_buffered_lines: Vec<Line<'static>>,
     has_emitted_history_lines: bool,
 
     pub(crate) enhanced_keys_supported: bool,
@@ -444,6 +450,9 @@ impl App {
             transcript_cells: Vec::new(),
             overlay: None,
             deferred_history_lines: Vec::new(),
+            turn_scrollback_checkpoint: None,
+            turn_scrollback_buffer_has_emitted_history_lines: false,
+            turn_scrollback_buffered_lines: Vec::new(),
             has_emitted_history_lines: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
@@ -679,17 +688,29 @@ impl App {
                     // Only insert a separating blank line for new cells that are not
                     // part of an ongoing stream. Streaming continuations should not
                     // accrue extra blank lines between chunks.
-                    if !cell.is_stream_continuation() {
-                        if self.has_emitted_history_lines {
-                            display.insert(0, Line::from(""));
-                        } else {
-                            self.has_emitted_history_lines = true;
+                    if self.turn_scrollback_checkpoint.is_some() {
+                        if !cell.is_stream_continuation() {
+                            if self.turn_scrollback_buffer_has_emitted_history_lines {
+                                display.insert(0, Line::from(""));
+                            } else {
+                                self.turn_scrollback_buffer_has_emitted_history_lines = true;
+                            }
                         }
-                    }
-                    if self.overlay.is_some() {
-                        self.deferred_history_lines.extend(display);
+                        self.turn_scrollback_buffered_lines.extend(display);
+                        tui.frame_requester().schedule_frame();
                     } else {
-                        tui.insert_history_lines(display);
+                        if !cell.is_stream_continuation() {
+                            if self.has_emitted_history_lines {
+                                display.insert(0, Line::from(""));
+                            } else {
+                                self.has_emitted_history_lines = true;
+                            }
+                        }
+                        if self.overlay.is_some() {
+                            self.deferred_history_lines.extend(display);
+                        } else {
+                            tui.insert_history_lines(display);
+                        }
                     }
                 }
             }
@@ -722,6 +743,66 @@ impl App {
                     self.suppress_shutdown_complete = false;
                     return Ok(true);
                 }
+
+                if matches!(&event.msg, EventMsg::TurnStarted(_)) {
+                    self.turn_scrollback_checkpoint = Some(self.transcript_cells.len());
+                    self.turn_scrollback_buffer_has_emitted_history_lines =
+                        self.has_emitted_history_lines;
+                    self.turn_scrollback_buffered_lines.clear();
+                }
+
+                if matches!(&event.msg, EventMsg::StreamError(_))
+                    && let Some(checkpoint) = self.turn_scrollback_checkpoint
+                {
+                    self.transcript_cells.truncate(checkpoint);
+                    self.turn_scrollback_buffer_has_emitted_history_lines =
+                        self.has_emitted_history_lines;
+                    self.turn_scrollback_buffered_lines.clear();
+                    tui.frame_requester().schedule_frame();
+                }
+
+                if matches!(&event.msg, EventMsg::TurnCommitted(_))
+                    && self.turn_scrollback_checkpoint.take().is_some()
+                {
+                    self.has_emitted_history_lines =
+                        self.turn_scrollback_buffer_has_emitted_history_lines;
+                    let buffered = std::mem::take(&mut self.turn_scrollback_buffered_lines);
+                    if !buffered.is_empty() {
+                        if self.overlay.is_some() {
+                            self.deferred_history_lines.extend(buffered);
+                        } else {
+                            tui.insert_history_lines(buffered);
+                        }
+                    }
+                }
+
+                if matches!(&event.msg, EventMsg::Error(_))
+                    && let Some(checkpoint) = self.turn_scrollback_checkpoint.take()
+                {
+                    self.transcript_cells.truncate(checkpoint);
+                    self.turn_scrollback_buffer_has_emitted_history_lines =
+                        self.has_emitted_history_lines;
+                    self.turn_scrollback_buffered_lines.clear();
+                    tui.frame_requester().schedule_frame();
+                }
+
+                if matches!(
+                    &event.msg,
+                    EventMsg::TaskComplete(_) | EventMsg::TurnAborted(_)
+                ) && self.turn_scrollback_checkpoint.take().is_some()
+                {
+                    self.has_emitted_history_lines =
+                        self.turn_scrollback_buffer_has_emitted_history_lines;
+                    let buffered = std::mem::take(&mut self.turn_scrollback_buffered_lines);
+                    if !buffered.is_empty() {
+                        if self.overlay.is_some() {
+                            self.deferred_history_lines.extend(buffered);
+                        } else {
+                            tui.insert_history_lines(buffered);
+                        }
+                    }
+                }
+
                 if let EventMsg::ListSkillsResponse(response) = &event.msg {
                     let cwd = self.chat_widget.config_ref().cwd.clone();
                     let errors = errors_for_cwd(&cwd, response);
@@ -1378,6 +1459,9 @@ mod tests {
             transcript_cells: Vec::new(),
             overlay: None,
             deferred_history_lines: Vec::new(),
+            turn_scrollback_checkpoint: None,
+            turn_scrollback_buffer_has_emitted_history_lines: false,
+            turn_scrollback_buffered_lines: Vec::new(),
             has_emitted_history_lines: false,
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
@@ -1418,6 +1502,9 @@ mod tests {
                 transcript_cells: Vec::new(),
                 overlay: None,
                 deferred_history_lines: Vec::new(),
+                turn_scrollback_checkpoint: None,
+                turn_scrollback_buffer_has_emitted_history_lines: false,
+                turn_scrollback_buffered_lines: Vec::new(),
                 has_emitted_history_lines: false,
                 enhanced_keys_supported: false,
                 commit_anim_running: Arc::new(AtomicBool::new(false)),

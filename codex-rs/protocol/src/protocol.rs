@@ -70,6 +70,12 @@ pub enum Op {
     /// This server sends [`EventMsg::TurnAborted`] in response.
     Interrupt,
 
+    /// Trigger a new agent turn without adding a new user message.
+    ///
+    /// This is intended for UI commands like `/continue`, where the user wants
+    /// the model to "keep going" based on the current committed history.
+    Continue,
+
     /// Input from the user
     UserInput {
         /// User input items, see `InputItem`
@@ -541,6 +547,12 @@ pub enum EventMsg {
     /// Agent has started a task
     TaskStarted(TaskStartedEvent),
 
+    /// Agent has started a new model turn within the current task.
+    TurnStarted(TurnStartedEvent),
+
+    /// Agent has committed the current model turn output.
+    TurnCommitted(TurnCommittedEvent),
+
     /// Agent has completed all actions
     TaskComplete(TaskCompleteEvent),
 
@@ -843,6 +855,12 @@ pub struct TaskCompleteEvent {
 pub struct TaskStartedEvent {
     pub model_context_window: Option<i64>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct TurnStartedEvent;
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct TurnCommittedEvent;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, TS)]
 pub struct TokenUsage {

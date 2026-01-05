@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use crate::AuthManager;
 use crate::SandboxState;
@@ -43,7 +44,9 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TaskStartedEvent;
 use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnCommittedEvent;
 use codex_protocol::protocol::TurnContextItem;
+use codex_protocol::protocol::TurnStartedEvent;
 use codex_rmcp_client::ElicitationResponse;
 use futures::future::BoxFuture;
 use futures::prelude::*;
@@ -467,6 +470,8 @@ pub(crate) struct SessionSettingsUpdate {
 }
 
 impl Session {
+    const USER_INTERRUPT_MARKER: &str = "<event user_interrupt=\"true\"/>";
+
     /// Don't expand the number of mutated arguments on config. We are in the process of getting rid of it.
     fn build_per_turn_config(session_configuration: &SessionConfiguration) -> Config {
         // todo(aibrahim): store this state somewhere else so we don't need to mut config
@@ -1246,6 +1251,18 @@ impl Session {
         self.record_conversation_items(ctx, &[item]).await;
     }
 
+    pub(crate) async fn record_user_interrupt_marker(&self, turn_context: &TurnContext) {
+        let item = ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: Self::USER_INTERRUPT_MARKER.to_string(),
+            }],
+        };
+
+        self.record_conversation_items(turn_context, &[item]).await;
+    }
+
     pub(crate) async fn replace_history(&self, items: Vec<ResponseItem>) {
         let mut state = self.state.lock().await;
         state.replace_history(items);
@@ -1598,6 +1615,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::Interrupt => {
                 handlers::interrupt(&sess).await;
             }
+            Op::Continue => {
+                handlers::continue_turn(&sess, sub.id.clone(), &mut previous_context).await;
+            }
             Op::OverrideTurnContext {
                 cwd,
                 approval_policy,
@@ -1797,6 +1817,24 @@ mod handlers {
                 .await;
             *previous_context = Some(current_context);
         }
+    }
+
+    pub async fn continue_turn(
+        sess: &Arc<Session>,
+        sub_id: String,
+        previous_context: &mut Option<Arc<TurnContext>>,
+    ) {
+        let current_context = sess.new_default_turn_with_sub_id(sub_id).await;
+        if let Some(env_item) =
+            sess.build_environment_update_item(previous_context.as_ref(), &current_context)
+        {
+            sess.record_conversation_items(&current_context, std::slice::from_ref(&env_item))
+                .await;
+        }
+
+        sess.spawn_task(Arc::clone(&current_context), Vec::new(), RegularTask)
+            .await;
+        *previous_context = Some(current_context);
     }
 
     pub async fn run_user_shell_command(
@@ -2220,9 +2258,7 @@ pub(crate) async fn run_task(
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
 ) -> Option<String> {
-    if input.is_empty() {
-        return None;
-    }
+    let has_user_input = !input.is_empty();
 
     let auto_compact_limit = turn_context
         .client
@@ -2244,24 +2280,31 @@ pub(crate) async fn run_task(
             .skills_for_cwd(&turn_context.cwd)
     });
 
-    let SkillInjections {
-        items: skill_items,
-        warnings: skill_warnings,
-    } = build_skill_injections(&input, skills_outcome.as_ref()).await;
+    let (skill_items, skill_warnings) = if has_user_input {
+        let SkillInjections {
+            items: skill_items,
+            warnings: skill_warnings,
+        } = build_skill_injections(&input, skills_outcome.as_ref()).await;
+        (skill_items, skill_warnings)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     for message in skill_warnings {
         sess.send_event(&turn_context, EventMsg::Warning(WarningEvent { message }))
             .await;
     }
 
-    let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
-    let response_item: ResponseItem = initial_input_for_turn.clone().into();
-    sess.record_response_item_and_emit_turn_item(turn_context.as_ref(), response_item)
-        .await;
-
-    if !skill_items.is_empty() {
-        sess.record_conversation_items(&turn_context, &skill_items)
+    if has_user_input {
+        let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+        let response_item: ResponseItem = initial_input_for_turn.clone().into();
+        sess.record_response_item_and_emit_turn_item(turn_context.as_ref(), response_item)
             .await;
+
+        if !skill_items.is_empty() {
+            sess.record_conversation_items(&turn_context, &skill_items)
+                .await;
+        }
     }
 
     sess.maybe_start_ghost_snapshot(Arc::clone(&turn_context), cancellation_token.child_token())
@@ -2381,6 +2424,9 @@ async fn run_turn(
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
+    sess.send_event(&turn_context, EventMsg::TurnStarted(TurnStartedEvent))
+        .await;
+
     let mcp_tools = sess
         .services
         .mcp_connection_manager
@@ -2449,35 +2495,42 @@ async fn run_turn(
             Err(e @ CodexErr::InvalidRequest(_)) => return Err(e),
             Err(e @ CodexErr::RefreshTokenFailed(_)) => return Err(e),
             Err(e) => {
-                // Use the configured provider-specific stream retry budget.
-                let max_retries = turn_context.client.get_provider().stream_max_retries();
-                if retries < max_retries {
-                    retries += 1;
-                    let delay = match e {
-                        CodexErr::Stream(_, Some(delay)) => delay,
-                        _ => backoff(retries),
-                    };
-                    warn!(
-                        "stream disconnected - retrying turn ({retries}/{max_retries} in {delay:?})...",
-                    );
-
-                    // Surface retry information to any UI/front‑end so the
-                    // user understands what is happening instead of staring
-                    // at a seemingly frozen screen.
-                    sess.notify_stream_error(
-                        &turn_context,
-                        format!("Reconnecting... {retries}/{max_retries}"),
-                        e,
-                    )
-                    .await;
-
-                    tokio::time::sleep(delay).await;
-                } else {
+                if !is_stream_retryable(&e) {
                     return Err(e);
                 }
+
+                // For stream-level failures, retry indefinitely. This avoids treating
+                // transient disconnects as a hard failure. Backoff is bounded to
+                // a fixed maximum to avoid "hung" UX.
+                retries += 1;
+                let delay = match e {
+                    CodexErr::Stream(_, Some(delay)) => delay,
+                    _ => backoff(retries),
+                }
+                .min(Duration::from_secs(5));
+                warn!("stream disconnected - retrying turn ({retries} in {delay:?})...");
+
+                // Surface retry information to any UI/front‑end so the user understands
+                // what is happening instead of staring at a seemingly frozen screen.
+                sess.notify_stream_error(&turn_context, format!("Reconnecting... {retries}"), e)
+                    .await;
+
+                tokio::time::sleep(delay)
+                    .or_cancel(&cancellation_token)
+                    .await?;
             }
         }
     }
+}
+
+fn is_stream_retryable(err: &CodexErr) -> bool {
+    matches!(
+        err,
+        CodexErr::Stream(_, _)
+            | CodexErr::Timeout
+            | CodexErr::ConnectionFailed(_)
+            | CodexErr::ResponseStreamFailed(_)
+    )
 }
 
 #[derive(Debug)]
@@ -2535,7 +2588,6 @@ async fn try_run_turn(
         truncation_policy: Some(turn_context.truncation_policy.into()),
     });
 
-    sess.persist_rollout_items(&[rollout_item]).await;
     let mut stream = turn_context
         .client
         .clone()
@@ -2552,6 +2604,8 @@ async fn try_run_turn(
     );
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
+    let mut response_items_to_commit: Vec<ResponseItem> = Vec::new();
+    let mut tool_calls_to_commit = Vec::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
@@ -2597,16 +2651,13 @@ async fn try_run_turn(
                 let mut ctx = HandleOutputCtx {
                     sess: sess.clone(),
                     turn_context: turn_context.clone(),
-                    tool_runtime: tool_runtime.clone(),
-                    cancellation_token: cancellation_token.child_token(),
                 };
 
                 let output_result = handle_output_item_done(&mut ctx, item, previously_active_item)
                     .instrument(handle_responses)
                     .await?;
-                if let Some(tool_future) = output_result.tool_future {
-                    in_flight.push_back(tool_future);
-                }
+                response_items_to_commit.extend(output_result.commit_items);
+                tool_calls_to_commit.extend(output_result.tool_calls);
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message = Some(agent_message);
                 }
@@ -2705,7 +2756,32 @@ async fn try_run_turn(
         }
     };
 
+    match &outcome {
+        Ok(_) | Err(CodexErr::TurnAborted) => {
+            sess.persist_rollout_items(&[rollout_item]).await;
+            sess.record_conversation_items(&turn_context, &response_items_to_commit)
+                .await;
+
+            if outcome.is_ok() {
+                for call in tool_calls_to_commit {
+                    let cancellation_token = cancellation_token.child_token();
+                    in_flight.push_back(Box::pin(
+                        tool_runtime
+                            .clone()
+                            .handle_tool_call(call, cancellation_token),
+                    ));
+                }
+            }
+        }
+        Err(_) => {}
+    }
+
     drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+
+    if matches!(&outcome, Ok(_) | Err(CodexErr::TurnAborted)) {
+        sess.send_event(&turn_context, EventMsg::TurnCommitted(TurnCommittedEvent))
+            .await;
+    }
 
     if should_emit_turn_diff {
         let unified_diff = {

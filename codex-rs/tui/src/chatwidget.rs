@@ -1205,6 +1205,11 @@ impl ChatWidget {
         if self.retry_status_header.is_none() {
             self.retry_status_header = Some(self.current_status_header.clone());
         }
+        // Stream retries should not interleave partial output from the previous
+        // attempt with the next attempt's deltas.
+        self.stream_controller = None;
+        self.reasoning_buffer.clear();
+        self.full_reasoning_buffer.clear();
         self.set_status(message, additional_details);
     }
 
@@ -1837,6 +1842,10 @@ impl ChatWidget {
                 self.clear_token_usage();
                 self.app_event_tx.send(AppEvent::CodexOp(Op::Compact));
             }
+            SlashCommand::Continue => {
+                self.add_info_message("Continuing...".to_string(), None);
+                self.app_event_tx.send(AppEvent::CodexOp(Op::Continue));
+            }
             SlashCommand::Review => {
                 self.open_review_popup();
             }
@@ -2409,6 +2418,7 @@ impl ChatWidget {
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
             EventMsg::ContextCompacted(_) => self.on_agent_message("Context compacted".to_owned()),
+            EventMsg::TurnStarted(_) | EventMsg::TurnCommitted(_) => {}
             EventMsg::RawResponseItem(_)
             | EventMsg::ItemStarted(_)
             | EventMsg::ItemCompleted(_)
