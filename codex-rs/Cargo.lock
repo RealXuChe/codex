@@ -1146,7 +1146,6 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-arg0",
  "codex-chatgpt",
- "codex-cloud-tasks",
  "codex-common",
  "codex-core",
  "codex-exec",
