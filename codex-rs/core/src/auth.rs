@@ -41,17 +41,63 @@ use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct CodexAuth {
-    pub mode: AuthMode,
-
-    pub(crate) api_key: Option<String>,
     pub(crate) auth_dot_json: Arc<Mutex<Option<AuthDotJson>>>,
     storage: Arc<dyn AuthStorageBackend>,
     pub(crate) client: CodexHttpClient,
 }
 
-impl PartialEq for CodexAuth {
-    fn eq(&self, other: &Self) -> bool {
-        self.mode == other.mode
+#[derive(Debug, Clone)]
+pub enum Auth {
+    ChatGpt { handle: CodexAuth },
+    ApiKey { handle: ApiKeyAuth },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyAuth {
+    api_key: String,
+}
+
+impl ApiKeyAuth {
+    pub fn new(api_key: String) -> Self {
+        Self { api_key }
+    }
+
+    pub fn bearer_token(&self) -> String {
+        self.api_key.clone()
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.api_key.as_str()
+    }
+}
+
+impl Auth {
+    pub fn mode(&self) -> AuthMode {
+        match self {
+            Self::ChatGpt { .. } => AuthMode::ChatGPT,
+            Self::ApiKey { .. } => AuthMode::ApiKey,
+        }
+    }
+
+    pub fn account_id(&self) -> Option<String> {
+        match self {
+            Self::ChatGpt { handle } => handle.get_account_id(),
+            Self::ApiKey { .. } => None,
+        }
+    }
+
+    pub fn account_email(&self) -> Option<String> {
+        match self {
+            Self::ChatGpt { handle } => handle.get_account_email(),
+            Self::ApiKey { .. } => None,
+        }
+    }
+
+    pub async fn bearer_token(&self) -> Result<String, std::io::Error> {
+        match self {
+            Self::ChatGpt { handle } => handle.get_token().await,
+            Self::ApiKey { handle } => Ok(handle.bearer_token()),
+        }
     }
 }
 
@@ -134,14 +180,6 @@ impl CodexAuth {
         Ok(access)
     }
 
-    /// Loads the available auth information from auth storage.
-    pub fn from_auth_storage(
-        codex_home: &Path,
-        auth_credentials_store_mode: AuthCredentialsStoreMode,
-    ) -> std::io::Result<Option<CodexAuth>> {
-        load_auth(codex_home, false, auth_credentials_store_mode)
-    }
-
     pub async fn get_token_data(&self) -> Result<TokenData, std::io::Error> {
         let auth_dot_json: Option<AuthDotJson> = self.get_current_auth_json();
         match auth_dot_json {
@@ -194,13 +232,7 @@ impl CodexAuth {
     }
 
     pub async fn get_token(&self) -> Result<String, std::io::Error> {
-        match self.mode {
-            AuthMode::ApiKey => Ok(self.api_key.clone().unwrap_or_default()),
-            AuthMode::ChatGPT => {
-                let id_token = self.get_token_data().await?.access_token;
-                Ok(id_token)
-            }
-        }
+        Ok(self.get_token_data().await?.access_token)
     }
 
     pub fn get_account_id(&self) -> Option<String> {
@@ -260,27 +292,18 @@ impl CodexAuth {
 
         let auth_dot_json = Arc::new(Mutex::new(Some(auth_dot_json)));
         Self {
-            api_key: None,
-            mode: AuthMode::ChatGPT,
             storage: create_auth_storage(PathBuf::new(), AuthCredentialsStoreMode::File),
             auth_dot_json,
             client: crate::default_client::create_client(),
         }
     }
+}
 
-    fn from_api_key_with_client(api_key: &str, client: CodexHttpClient) -> Self {
-        Self {
-            api_key: Some(api_key.to_owned()),
-            mode: AuthMode::ApiKey,
-            storage: create_auth_storage(PathBuf::new(), AuthCredentialsStoreMode::File),
-            auth_dot_json: Arc::new(Mutex::new(None)),
-            client,
-        }
-    }
-
-    pub fn from_api_key(api_key: &str) -> Self {
-        Self::from_api_key_with_client(api_key, crate::default_client::create_client())
-    }
+pub fn load_auth_from_storage(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<Option<Auth>> {
+    load_auth(codex_home, false, auth_credentials_store_mode)
 }
 
 pub const OPENAI_API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";
@@ -360,7 +383,7 @@ pub async fn enforce_login_restrictions(config: &Config) -> std::io::Result<()> 
     };
 
     if let Some(required_method) = config.forced_login_method {
-        let method_violation = match (required_method, auth.mode) {
+        let method_violation = match (required_method, auth.mode()) {
             (ForcedLoginMethod::Api, AuthMode::ApiKey) => None,
             (ForcedLoginMethod::Chatgpt, AuthMode::ChatGPT) => None,
             (ForcedLoginMethod::Api, AuthMode::ChatGPT) => Some(
@@ -402,13 +425,11 @@ fn load_auth(
     codex_home: &Path,
     enable_codex_api_key_env: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
-) -> std::io::Result<Option<CodexAuth>> {
+) -> std::io::Result<Option<Auth>> {
     if enable_codex_api_key_env && let Some(api_key) = read_codex_api_key_from_env() {
-        let client = crate::default_client::create_client();
-        return Ok(Some(CodexAuth::from_api_key_with_client(
-            api_key.as_str(),
-            client,
-        )));
+        return Ok(Some(Auth::ApiKey {
+            handle: ApiKeyAuth::new(api_key),
+        }));
     }
 
     let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
@@ -429,21 +450,23 @@ fn load_auth(
 
     // Prefer AuthMode.ApiKey if it's set in the auth.json.
     if let Some(api_key) = &auth_json_api_key {
-        return Ok(Some(CodexAuth::from_api_key_with_client(api_key, client)));
+        return Ok(Some(Auth::ApiKey {
+            handle: ApiKeyAuth::new(api_key.clone()),
+        }));
     }
 
-    Ok(Some(CodexAuth {
-        api_key: None,
-        mode: AuthMode::ChatGPT,
-        storage: storage.clone(),
-        auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
-            openai_api_key: None,
-            chatgpt_entries: Vec::new(),
-            api_keys: Vec::new(),
-            tokens,
-            last_refresh,
-        }))),
-        client,
+    Ok(Some(Auth::ChatGpt {
+        handle: CodexAuth {
+            storage: storage.clone(),
+            auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
+                openai_api_key: None,
+                chatgpt_entries: Vec::new(),
+                api_keys: Vec::new(),
+                tokens,
+                last_refresh,
+            }))),
+            client,
+        },
     }))
 }
 
@@ -598,7 +621,15 @@ use std::sync::RwLock;
 /// Internal cached auth state.
 #[derive(Clone, Debug)]
 struct CachedAuth {
-    auth: Option<CodexAuth>,
+    auth: Option<Auth>,
+}
+
+fn auths_equal(a: &Option<Auth>, b: &Option<Auth>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.mode() == b.mode(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -685,7 +716,7 @@ mod tests {
     #[test]
     fn missing_auth_json_returns_none() {
         let dir = tempdir().unwrap();
-        let auth = CodexAuth::from_auth_storage(dir.path(), AuthCredentialsStoreMode::File)
+        let auth = load_auth_from_storage(dir.path(), AuthCredentialsStoreMode::File)
             .expect("call should succeed");
         assert_eq!(auth, None);
     }
@@ -759,10 +790,13 @@ mod tests {
         let auth = super::load_auth(dir.path(), false, AuthCredentialsStoreMode::File)
             .unwrap()
             .unwrap();
-        assert_eq!(auth.mode, AuthMode::ApiKey);
-        assert_eq!(auth.api_key, Some("sk-test-key".to_string()));
+        let token = auth.bearer_token().await.unwrap();
+        assert_eq!(token, "sk-test-key");
 
-        assert!(auth.get_token_data().await.is_err());
+        let Auth::ApiKey { handle: api_key } = auth else {
+            panic!("expected API key auth");
+        };
+        assert_eq!(api_key.as_str(), "sk-test-key");
     }
 
     #[test]
@@ -1002,7 +1036,31 @@ impl AuthManager {
     #[expect(clippy::expect_used)]
     /// Create an AuthManager with a specific CodexAuth, for testing only.
     pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
-        let cached = CachedAuth { auth: Some(auth) };
+        let cached = CachedAuth {
+            auth: Some(Auth::ChatGpt { handle: auth }),
+        };
+        let temp_dir = tempfile::tempdir().expect("temp codex home");
+        let codex_home = temp_dir.path().to_path_buf();
+        TEST_AUTH_TEMP_DIRS
+            .lock()
+            .expect("lock test codex homes")
+            .push(temp_dir);
+        Arc::new(Self {
+            codex_home,
+            inner: RwLock::new(cached),
+            enable_codex_api_key_env: false,
+            auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[expect(clippy::expect_used)]
+    pub fn from_api_key_for_testing(api_key: &str) -> Arc<Self> {
+        let cached = CachedAuth {
+            auth: Some(Auth::ApiKey {
+                handle: ApiKeyAuth::new(api_key.to_string()),
+            }),
+        };
         let temp_dir = tempfile::tempdir().expect("temp codex home");
         let codex_home = temp_dir.path().to_path_buf();
         TEST_AUTH_TEMP_DIRS
@@ -1020,7 +1078,24 @@ impl AuthManager {
     #[cfg(any(test, feature = "test-support"))]
     /// Create an AuthManager with a specific CodexAuth and codex home, for testing only.
     pub fn from_auth_for_testing_with_home(auth: CodexAuth, codex_home: PathBuf) -> Arc<Self> {
-        let cached = CachedAuth { auth: Some(auth) };
+        let cached = CachedAuth {
+            auth: Some(Auth::ChatGpt { handle: auth }),
+        };
+        Arc::new(Self {
+            codex_home,
+            inner: RwLock::new(cached),
+            enable_codex_api_key_env: false,
+            auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_api_key_for_testing_with_home(api_key: &str, codex_home: PathBuf) -> Arc<Self> {
+        let cached = CachedAuth {
+            auth: Some(Auth::ApiKey {
+                handle: ApiKeyAuth::new(api_key.to_string()),
+            }),
+        };
         Arc::new(Self {
             codex_home,
             inner: RwLock::new(cached),
@@ -1030,7 +1105,7 @@ impl AuthManager {
     }
 
     /// Current cached auth (clone). May be `None` if not logged in or load failed.
-    pub fn auth(&self) -> Option<CodexAuth> {
+    pub fn auth(&self) -> Option<Auth> {
         self.inner.read().ok().and_then(|c| c.auth.clone())
     }
 
@@ -1049,19 +1124,11 @@ impl AuthManager {
         .ok()
         .flatten();
         if let Ok(mut guard) = self.inner.write() {
-            let changed = !AuthManager::auths_equal(&guard.auth, &new_auth);
+            let changed = !auths_equal(&guard.auth, &new_auth);
             guard.auth = new_auth;
             changed
         } else {
             false
-        }
-    }
-
-    fn auths_equal(a: &Option<CodexAuth>, b: &Option<CodexAuth>) -> bool {
-        match (a, b) {
-            (None, None) => true,
-            (Some(a), Some(b)) => a == b,
-            _ => false,
         }
     }
 
@@ -1083,11 +1150,13 @@ impl AuthManager {
     /// If the token refresh fails in a permanent (non‑transient) way, logs out
     /// to clear invalid auth state.
     pub async fn refresh_token(&self) -> Result<Option<String>, RefreshTokenError> {
-        let auth = match self.auth() {
-            Some(a) => a,
-            None => return Ok(None),
+        let Some(auth) = self.auth() else {
+            return Ok(None);
         };
-        match auth.refresh_token().await {
+        let Auth::ChatGpt { handle } = auth else {
+            return Ok(None);
+        };
+        match handle.refresh_token().await {
             Ok(token) => {
                 // Reload to pick up persisted changes.
                 self.reload();
@@ -1112,6 +1181,6 @@ impl AuthManager {
     }
 
     pub fn get_auth_mode(&self) -> Option<AuthMode> {
-        self.auth().map(|a| a.mode)
+        self.auth().map(|a| a.mode())
     }
 }

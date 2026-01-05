@@ -10,7 +10,6 @@ use codex_app_server_protocol::AuthMode;
 use codex_common::oss::ensure_oss_provider_ready;
 use codex_common::oss::get_default_model_for_oss_provider;
 use codex_core::AuthManager;
-use codex_core::CodexAuth;
 use codex_core::INTERACTIVE_SESSION_SOURCES;
 use codex_core::RolloutRecorder;
 use codex_core::auth::enforce_login_restrictions;
@@ -536,8 +535,11 @@ fn get_login_status(config: &Config) -> LoginStatus {
         // Reading the OpenAI API key is an async operation because it may need
         // to refresh the token. Block on it.
         let codex_home = config.codex_home.clone();
-        match CodexAuth::from_auth_storage(&codex_home, config.cli_auth_credentials_store_mode) {
-            Ok(Some(auth)) => LoginStatus::AuthMode(auth.mode),
+        match codex_core::auth::load_auth_from_storage(
+            &codex_home,
+            config.cli_auth_credentials_store_mode,
+        ) {
+            Ok(Some(auth)) => LoginStatus::AuthMode(auth.mode()),
             Ok(None) => LoginStatus::NotAuthenticated,
             Err(err) => {
                 error!("Failed to read auth.json: {err}");

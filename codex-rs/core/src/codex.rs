@@ -595,9 +595,9 @@ impl Session {
             conversation_id,
             session_configuration.model.as_str(),
             session_configuration.model.as_str(),
-            auth_manager.auth().and_then(|a| a.get_account_id()),
-            auth_manager.auth().and_then(|a| a.get_account_email()),
-            auth_manager.auth().map(|a| a.mode),
+            auth_manager.auth().and_then(|a| a.account_id()),
+            auth_manager.auth().and_then(|a| a.account_email()),
+            auth_manager.auth().map(|a| a.mode()),
             config.otel.log_user_prompt,
             terminal::user_agent(),
             session_configuration.session_source.clone(),
@@ -3177,8 +3177,7 @@ mod tests {
         let config = build_test_config(codex_home.path()).await;
         let config = Arc::new(config);
         let conversation_id = ConversationId::default();
-        let auth_manager =
-            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+        let auth_manager = AuthManager::from_api_key_for_testing("Test API Key");
         let models_manager = Arc::new(ModelsManager::new(auth_manager.clone()));
         let exec_policy = ExecPolicyManager::default();
         let model = ModelsManager::get_model_offline(config.model.as_deref());
@@ -3264,8 +3263,7 @@ mod tests {
         let config = build_test_config(codex_home.path()).await;
         let config = Arc::new(config);
         let conversation_id = ConversationId::default();
-        let auth_manager =
-            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+        let auth_manager = AuthManager::from_api_key_for_testing("Test API Key");
         let models_manager = Arc::new(ModelsManager::new(auth_manager.clone()));
         let exec_policy = ExecPolicyManager::default();
         let model = ModelsManager::get_model_offline(config.model.as_deref());

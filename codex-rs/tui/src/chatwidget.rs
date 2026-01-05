@@ -2279,9 +2279,9 @@ impl ChatWidget {
         let Some(auth) = self.auth_manager.auth() else {
             return;
         };
-        if auth.mode != AuthMode::ChatGPT {
+        let codex_core::auth::Auth::ChatGpt { handle: auth } = auth else {
             return;
-        }
+        };
 
         let base_url = self.config.chatgpt_base_url.clone();
         let app_event_tx = self.app_event_tx.clone();
