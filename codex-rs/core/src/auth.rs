@@ -192,9 +192,11 @@ impl CodexAuth {
         } else {
             refresh.await?
         };
-        let mut auth_dot_json = self.get_current_auth_json().ok_or_else(|| {
-            RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
-        })?;
+        let mut auth_dot_json = load_auth_dot_json_migrated(&self.storage)
+            .map_err(RefreshTokenError::from)?
+            .ok_or_else(|| {
+                RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
+            })?;
 
         let mut updated_tokens = token_data.clone();
         if let Some(id_token) = refresh_response.id_token {
@@ -400,14 +402,130 @@ pub fn login_with_api_key(
     api_key: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> std::io::Result<()> {
-    let auth_dot_json = AuthDotJson {
-        openai_api_key: Some(api_key.to_string()),
+    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    let mut auth_dot_json = load_auth_dot_json_migrated_or_default(&storage);
+
+    if let Some(existing) = auth_dot_json
+        .api_keys
+        .iter_mut()
+        .find(|entry| entry.api_key == api_key)
+    {
+        existing.api_key = api_key.to_string();
+    } else {
+        let id = next_entry_id(auth_dot_json.api_keys.iter().map(|e| e.id));
+        auth_dot_json.api_keys.push(crate::auth::storage::ApiKeyAuthEntry {
+            id,
+            name: None,
+            api_key: api_key.to_string(),
+        });
+    }
+
+    auth_dot_json.openai_api_key = None;
+    auth_dot_json.tokens = None;
+    auth_dot_json.last_refresh = None;
+
+    storage.save(&auth_dot_json)
+}
+
+pub fn persist_chatgpt_tokens(
+    codex_home: &Path,
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<()> {
+    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    let mut auth_dot_json = load_auth_dot_json_migrated_or_default(&storage);
+
+    let id_token_info = parse_id_token(&id_token).map_err(std::io::Error::other)?;
+    let tokens = TokenData {
+        account_id: id_token_info.chatgpt_account_id.clone(),
+        id_token: id_token_info,
+        access_token,
+        refresh_token,
+    };
+
+    let key = ChatGptKey::from_tokens(&tokens)
+        .ok_or_else(|| std::io::Error::other("ChatGPT tokens missing required identity fields"))?;
+
+    if let Some(existing) = auth_dot_json.chatgpt_entries.iter_mut().find(|entry| {
+        ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == key)
+    }) {
+        existing.tokens = tokens;
+        existing.last_refresh = Some(Utc::now());
+    } else {
+        let id = next_entry_id(auth_dot_json.chatgpt_entries.iter().map(|e| e.id));
+        auth_dot_json.chatgpt_entries.push(ChatGptAuthEntry {
+            id,
+            name: None,
+            tokens,
+            last_refresh: Some(Utc::now()),
+        });
+    }
+
+    auth_dot_json.openai_api_key = None;
+    auth_dot_json.tokens = None;
+    auth_dot_json.last_refresh = None;
+
+    storage.save(&auth_dot_json)
+}
+
+fn next_entry_id(ids: impl Iterator<Item = u32>) -> u32 {
+    ids.max().unwrap_or(0).saturating_add(1)
+}
+
+fn migrate_legacy_auth_dot_json(auth_dot_json: &mut AuthDotJson) {
+    if let Some(api_key) = auth_dot_json.openai_api_key.take()
+        && auth_dot_json.api_keys.iter().all(|entry| entry.api_key != api_key)
+    {
+        let id = next_entry_id(auth_dot_json.api_keys.iter().map(|e| e.id));
+        auth_dot_json
+            .api_keys
+            .push(crate::auth::storage::ApiKeyAuthEntry {
+                id,
+                name: None,
+                api_key,
+            });
+    }
+
+    if let Some(tokens) = auth_dot_json.tokens.take() {
+        if auth_dot_json
+            .chatgpt_entries
+            .iter()
+            .all(|entry| entry.tokens != tokens)
+        {
+            let id = next_entry_id(auth_dot_json.chatgpt_entries.iter().map(|e| e.id));
+            auth_dot_json.chatgpt_entries.push(ChatGptAuthEntry {
+                id,
+                name: None,
+                tokens,
+                last_refresh: auth_dot_json.last_refresh,
+            });
+        }
+    }
+    auth_dot_json.last_refresh = None;
+}
+
+fn load_auth_dot_json_migrated(
+    storage: &Arc<dyn AuthStorageBackend>,
+) -> std::io::Result<Option<AuthDotJson>> {
+    let Some(mut auth_dot_json) = storage.load()? else {
+        return Ok(None);
+    };
+    migrate_legacy_auth_dot_json(&mut auth_dot_json);
+    Ok(Some(auth_dot_json))
+}
+
+fn load_auth_dot_json_migrated_or_default(storage: &Arc<dyn AuthStorageBackend>) -> AuthDotJson {
+    let mut auth_dot_json = storage.load().ok().flatten().unwrap_or(AuthDotJson {
+        openai_api_key: None,
         chatgpt_entries: Vec::new(),
         api_keys: Vec::new(),
         tokens: None,
         last_refresh: None,
-    };
-    save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)
+    });
+    migrate_legacy_auth_dot_json(&mut auth_dot_json);
+    auth_dot_json
 }
 
 /// Persist the provided auth payload using the specified backend.
@@ -496,9 +614,8 @@ fn load_auth(
     let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
 
     let client = crate::default_client::create_client();
-    let auth_dot_json = match storage.load()? {
-        Some(auth) => auth,
-        None => return Ok(None),
+    let Some(auth_dot_json) = load_auth_dot_json_migrated(&storage)? else {
+        return Ok(None);
     };
     if let Some(entry) = auth_dot_json.api_keys.iter().min_by_key(|entry| entry.id) {
         return Ok(Some(Auth::ApiKey {
@@ -772,31 +889,37 @@ mod tests {
     #[test]
     fn login_with_api_key_overwrites_existing_auth_json() {
         let dir = tempdir().unwrap();
-        let auth_path = dir.path().join("auth.json");
-        let stale_auth = json!({
-            "OPENAI_API_KEY": "sk-old",
-            "tokens": {
-                "id_token": "stale.header.payload",
-                "access_token": "stale-access",
-                "refresh_token": "stale-refresh",
-                "account_id": "stale-acc"
-            }
-        });
-        std::fs::write(
-            &auth_path,
-            serde_json::to_string_pretty(&stale_auth).unwrap(),
+        let _jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: Some("sk-old".to_string()),
+                chatgpt_plan_type: "pro".to_string(),
+                chatgpt_account_id: None,
+            },
+            dir.path(),
         )
-        .unwrap();
+        .expect("failed to write auth file");
 
         super::login_with_api_key(dir.path(), "sk-new", AuthCredentialsStoreMode::File)
             .expect("login_with_api_key should succeed");
 
         let storage = FileAuthStorage::new(dir.path().to_path_buf());
         let auth = storage
-            .try_read_auth_json(&auth_path)
+            .try_read_auth_json(&dir.path().join("auth.json"))
             .expect("auth.json should parse");
-        assert_eq!(auth.openai_api_key.as_deref(), Some("sk-new"));
-        assert!(auth.tokens.is_none(), "tokens should be cleared");
+        assert!(auth.openai_api_key.is_none(), "legacy key should be migrated");
+        assert!(auth.tokens.is_none(), "legacy tokens should be migrated");
+        assert!(
+            auth.api_keys.iter().any(|entry| entry.api_key == "sk-new"),
+            "new API key should be stored as an entry"
+        );
+        assert!(
+            auth.api_keys.iter().any(|entry| entry.api_key == "sk-old"),
+            "existing API key should be preserved as an entry"
+        );
+        assert!(
+            !auth.chatgpt_entries.is_empty(),
+            "existing ChatGPT tokens should be preserved as an entry"
+        );
     }
 
     #[test]
@@ -1050,7 +1173,10 @@ mod tests {
             .expect("load auth")
             .expect("auth available");
 
-        pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::Pro));
+        let Auth::ChatGpt { handle } = auth else {
+            panic!("expected ChatGPT auth");
+        };
+        pretty_assertions::assert_eq!(handle.account_plan_type(), Some(AccountPlanType::Pro));
     }
 
     #[test]
@@ -1070,7 +1196,10 @@ mod tests {
             .expect("load auth")
             .expect("auth available");
 
-        pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::Unknown));
+        let Auth::ChatGpt { handle } = auth else {
+            panic!("expected ChatGPT auth");
+        };
+        pretty_assertions::assert_eq!(handle.account_plan_type(), Some(AccountPlanType::Unknown));
     }
 }
 

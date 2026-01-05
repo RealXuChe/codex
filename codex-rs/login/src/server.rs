@@ -13,13 +13,8 @@ use std::time::Duration;
 use crate::pkce::PkceCodes;
 use crate::pkce::generate_pkce;
 use base64::Engine;
-use chrono::Utc;
 use codex_core::auth::AuthCredentialsStoreMode;
-use codex_core::auth::AuthDotJson;
-use codex_core::auth::save_auth;
 use codex_core::default_client::originator;
-use codex_core::token_data::TokenData;
-use codex_core::token_data::parse_id_token;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
 use tiny_http::Header;
@@ -525,26 +520,19 @@ pub(crate) async fn persist_tokens_async(
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let mut tokens = TokenData {
-            id_token: parse_id_token(&id_token).map_err(io::Error::other)?,
+        codex_core::auth::persist_chatgpt_tokens(
+            &codex_home,
+            id_token,
             access_token,
             refresh_token,
-            account_id: None,
-        };
-        if let Some(acc) = jwt_auth_claims(&id_token)
-            .get("chatgpt_account_id")
-            .and_then(|v| v.as_str())
-        {
-            tokens.account_id = Some(acc.to_string());
+            auth_credentials_store_mode,
+        )?;
+
+        if let Some(api_key) = api_key {
+            codex_core::auth::login_with_api_key(&codex_home, &api_key, auth_credentials_store_mode)?;
         }
-        let auth = AuthDotJson {
-            openai_api_key: api_key,
-            chatgpt_entries: Vec::new(),
-            api_keys: Vec::new(),
-            tokens: Some(tokens),
-            last_refresh: Some(Utc::now()),
-        };
-        save_auth(&codex_home, &auth, auth_credentials_store_mode)
+
+        Ok(())
     })
     .await
     .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?
