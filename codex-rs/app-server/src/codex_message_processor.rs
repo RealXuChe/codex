@@ -636,7 +636,6 @@ impl CodexMessageProcessor {
             ..LoginServerOptions::new(
                 config.codex_home.clone(),
                 CLIENT_ID.to_string(),
-                config.forced_chatgpt_workspace_id.clone(),
                 config.cli_auth_credentials_store_mode,
             )
         })

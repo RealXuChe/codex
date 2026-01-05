@@ -5,12 +5,10 @@ use codex_app_server_protocol::GetAuthStatusParams;
 use codex_app_server_protocol::GetAuthStatusResponse;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
-use codex_app_server_protocol::LoginChatGptResponse;
 use codex_app_server_protocol::LogoutChatGptResponse;
 use codex_app_server_protocol::RequestId;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_login::login_with_api_key;
-use serial_test::serial;
 use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -97,22 +95,6 @@ forced_login_method = "{forced_method}"
     std::fs::write(config_toml, contents)
 }
 
-fn create_config_toml_forced_workspace(
-    codex_home: &Path,
-    workspace_id: &str,
-) -> std::io::Result<()> {
-    let config_toml = codex_home.join("config.toml");
-    let contents = format!(
-        r#"
-model = "mock-model"
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-forced_chatgpt_workspace_id = "{workspace_id}"
-"#
-    );
-    std::fs::write(config_toml, contents)
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn login_chatgpt_rejected_when_forced_api() -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -131,31 +113,6 @@ async fn login_chatgpt_rejected_when_forced_api() -> Result<()> {
     assert_eq!(
         err.error.message,
         "ChatGPT login is disabled. Use API key login instead."
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-// Serialize tests that launch the login server since it binds to a fixed port.
-#[serial(login_port)]
-async fn login_chatgpt_includes_forced_workspace_query_param() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    create_config_toml_forced_workspace(codex_home.path(), "ws-forced")?;
-
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-
-    let request_id = mcp.send_login_chat_gpt_request().await?;
-    let resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let login: LoginChatGptResponse = to_response(resp)?;
-    assert!(
-        login.auth_url.contains("allowed_workspace_id=ws-forced"),
-        "auth URL should include forced workspace"
     );
     Ok(())
 }

@@ -153,7 +153,6 @@ pub(crate) struct AuthModeWidget {
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
     pub login_status: LoginStatus,
     pub auth_manager: Arc<AuthManager>,
-    pub forced_chatgpt_workspace_id: Option<String>,
     pub forced_login_method: Option<ForcedLoginMethod>,
     pub animations_enabled: bool,
 }
@@ -566,7 +565,6 @@ impl AuthModeWidget {
         let opts = ServerOptions::new(
             self.codex_home.clone(),
             CLIENT_ID.to_string(),
-            self.forced_chatgpt_workspace_id.clone(),
             self.cli_auth_credentials_store_mode,
         );
         match run_login_server(opts) {
@@ -673,7 +671,6 @@ mod tests {
                 false,
                 AuthCredentialsStoreMode::File,
             ),
-            forced_chatgpt_workspace_id: None,
             forced_login_method: Some(ForcedLoginMethod::Chatgpt),
             animations_enabled: true,
         };

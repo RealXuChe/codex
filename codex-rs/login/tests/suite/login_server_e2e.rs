@@ -117,24 +117,34 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
         port: 0,
         open_browser: false,
         force_state: Some(state),
-        forced_chatgpt_workspace_id: Some(chatgpt_account_id.to_string()),
     };
     let server = run_login_server(opts)?;
-    assert!(
-        server
-            .auth_url
-            .contains(format!("allowed_workspace_id={chatgpt_account_id}").as_str()),
-        "auth URL should include forced workspace parameter"
-    );
     let login_port = server.actual_port;
 
     // Simulate browser callback, and follow redirect to /success
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
+        .no_proxy()
         .build()?;
     let url = format!("http://127.0.0.1:{login_port}/auth/callback?code=abc&state=test_state_123");
     let resp = client.get(&url).send().await?;
-    assert!(resp.status().is_success());
+    let resp = if resp.status().is_redirection() {
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect response should include a Location header");
+        client.get(location).send().await?
+    } else {
+        resp
+    };
+    let final_url = resp.url().clone();
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        status.is_success(),
+        "expected success, got {status} at {final_url}: {body}"
+    );
 
     // Wait for server shutdown
     server.block_until_done().await?;
@@ -178,15 +188,30 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
         port: 0,
         open_browser: false,
         force_state: Some(state),
-        forced_chatgpt_workspace_id: None,
     };
     let server = run_login_server(opts)?;
     let login_port = server.actual_port;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().no_proxy().build()?;
     let url = format!("http://127.0.0.1:{login_port}/auth/callback?code=abc&state=state2");
     let resp = client.get(&url).send().await?;
-    assert!(resp.status().is_success());
+    let resp = if resp.status().is_redirection() {
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect response should include a Location header");
+        client.get(location).send().await?
+    } else {
+        resp
+    };
+    let final_url = resp.url().clone();
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        status.is_success(),
+        "expected success, got {status} at {final_url}: {body}"
+    );
 
     server.block_until_done().await?;
 
@@ -195,63 +220,6 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
         auth_path.exists(),
         "auth.json should be created even if parent dir was missing"
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let (issuer_addr, _issuer_handle) = start_mock_issuer("org-actual");
-    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
-
-    let tmp = tempdir()?;
-    let codex_home = tmp.path().to_path_buf();
-    let state = "state-mismatch".to_string();
-
-    let opts = ServerOptions {
-        codex_home: codex_home.clone(),
-        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        client_id: codex_login::CLIENT_ID.to_string(),
-        issuer,
-        port: 0,
-        open_browser: false,
-        force_state: Some(state.clone()),
-        forced_chatgpt_workspace_id: Some("org-required".to_string()),
-    };
-    let server = run_login_server(opts)?;
-    assert!(
-        server
-            .auth_url
-            .contains("allowed_workspace_id=org-required"),
-        "auth URL should include forced workspace parameter"
-    );
-    let login_port = server.actual_port;
-
-    let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{login_port}/auth/callback?code=abc&state={state}");
-    let resp = client.get(&url).send().await?;
-    assert!(resp.status().is_success());
-    let body = resp.text().await?;
-    assert!(
-        body.contains("Login is restricted to workspace id org-required"),
-        "error body should mention workspace restriction"
-    );
-
-    let result = server.block_until_done().await;
-    assert!(
-        result.is_err(),
-        "login should fail due to workspace mismatch"
-    );
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-
-    let auth_path = codex_home.join("auth.json");
-    assert!(
-        !auth_path.exists(),
-        "auth.json should not be written when the workspace mismatches"
-    );
-
     Ok(())
 }
 
@@ -273,7 +241,6 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         port: 0,
         open_browser: false,
         force_state: Some("cancel_state".to_string()),
-        forced_chatgpt_workspace_id: None,
     };
 
     let first_server = run_login_server(first_opts)?;
@@ -293,7 +260,6 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         port: login_port,
         open_browser: false,
         force_state: Some("cancel_state_2".to_string()),
-        forced_chatgpt_workspace_id: None,
     };
 
     let second_server = run_login_server(second_opts)?;

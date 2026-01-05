@@ -308,9 +308,6 @@ pub struct Config {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
 
-    /// When set, restricts ChatGPT login to a specific workspace identifier.
-    pub forced_chatgpt_workspace_id: Option<String>,
-
     /// When set, restricts the login mechanism users may use.
     pub forced_login_method: Option<ForcedLoginMethod>,
 
@@ -708,10 +705,6 @@ pub struct ConfigToml {
     /// Compact prompt used for history compaction.
     pub compact_prompt: Option<String>,
 
-    /// When set, restricts ChatGPT login to a specific workspace identifier.
-    #[serde(default)]
-    pub forced_chatgpt_workspace_id: Option<String>,
-
     /// When set, restricts the login mechanism users may use.
     #[serde(default)]
     pub forced_login_method: Option<ForcedLoginMethod>,
@@ -844,7 +837,6 @@ impl From<ConfigToml> for UserSavedConfig {
             approval_policy: config_toml.approval_policy,
             sandbox_mode: config_toml.sandbox_mode,
             sandbox_settings: config_toml.sandbox_workspace_write.map(From::from),
-            forced_chatgpt_workspace_id: config_toml.forced_chatgpt_workspace_id,
             forced_login_method: config_toml.forced_login_method,
             model: config_toml.model,
             model_reasoning_effort: config_toml.model_reasoning_effort,
@@ -1244,16 +1236,6 @@ impl Config {
         let tools_web_search_request = features.enabled(Feature::WebSearchRequest);
         let use_experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
 
-        let forced_chatgpt_workspace_id =
-            cfg.forced_chatgpt_workspace_id.as_ref().and_then(|value| {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            });
-
         let forced_login_method = cfg.forced_login_method;
 
         let model = model.or(config_profile.model).or(cfg.model);
@@ -1377,7 +1359,6 @@ impl Config {
                 .chatgpt_base_url
                 .or(cfg.chatgpt_base_url)
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
-            forced_chatgpt_workspace_id,
             forced_login_method,
             include_apply_patch_tool: include_apply_patch_tool_flag,
             tools_web_search_request,
@@ -3186,7 +3167,6 @@ model_verbosity = "high"
                 base_instructions: None,
                 developer_instructions: None,
                 compact_prompt: None,
-                forced_chatgpt_workspace_id: None,
                 forced_login_method: None,
                 include_apply_patch_tool: false,
                 tools_web_search_request: false,
@@ -3269,7 +3249,6 @@ model_verbosity = "high"
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
-            forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
@@ -3367,7 +3346,6 @@ model_verbosity = "high"
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
-            forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
@@ -3451,7 +3429,6 @@ model_verbosity = "high"
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
-            forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
