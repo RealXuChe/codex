@@ -722,6 +722,7 @@ mod tests {
                         email: Some("user@example.com".to_string()),
                         chatgpt_plan_type: Some(InternalPlanType::Known(InternalKnownPlan::Pro)),
                         chatgpt_account_id: None,
+                        chatgpt_user_id: Some("user-12345".to_string()),
                         raw_jwt: fake_jwt,
                     },
                     access_token: "test-access-token".to_string(),
