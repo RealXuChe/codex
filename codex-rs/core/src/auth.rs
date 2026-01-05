@@ -247,6 +247,8 @@ impl CodexAuth {
     pub fn create_dummy_chatgpt_auth_for_testing() -> Self {
         let auth_dot_json = AuthDotJson {
             openai_api_key: None,
+            chatgpt_entries: Vec::new(),
+            api_keys: Vec::new(),
             tokens: Some(TokenData {
                 id_token: Default::default(),
                 access_token: "Access Token".to_string(),
@@ -316,6 +318,8 @@ pub fn login_with_api_key(
 ) -> std::io::Result<()> {
     let auth_dot_json = AuthDotJson {
         openai_api_key: Some(api_key.to_string()),
+        chatgpt_entries: Vec::new(),
+        api_keys: Vec::new(),
         tokens: None,
         last_refresh: None,
     };
@@ -417,6 +421,8 @@ fn load_auth(
 
     let AuthDotJson {
         openai_api_key: auth_json_api_key,
+        chatgpt_entries: _,
+        api_keys: _,
         tokens,
         last_refresh,
     } = auth_dot_json;
@@ -432,6 +438,8 @@ fn load_auth(
         storage: storage.clone(),
         auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
             openai_api_key: None,
+            chatgpt_entries: Vec::new(),
+            api_keys: Vec::new(),
             tokens,
             last_refresh,
         }))),
@@ -717,6 +725,8 @@ mod tests {
         assert_eq!(
             &AuthDotJson {
                 openai_api_key: None,
+                chatgpt_entries: Vec::new(),
+                api_keys: Vec::new(),
                 tokens: Some(TokenData {
                     id_token: IdTokenInfo {
                         email: Some("user@example.com".to_string()),
@@ -760,6 +770,8 @@ mod tests {
         let dir = tempdir()?;
         let auth_dot_json = AuthDotJson {
             openai_api_key: Some("sk-test-key".to_string()),
+            chatgpt_entries: Vec::new(),
+            api_keys: Vec::new(),
             tokens: None,
             last_refresh: None,
         };

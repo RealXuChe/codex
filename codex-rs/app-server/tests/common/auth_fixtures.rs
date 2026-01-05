@@ -127,6 +127,8 @@ pub fn write_chatgpt_auth(
 
     let auth = AuthDotJson {
         openai_api_key: None,
+        chatgpt_entries: Vec::new(),
+        api_keys: Vec::new(),
         tokens: Some(tokens),
         last_refresh,
     };

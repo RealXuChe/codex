@@ -15,6 +15,24 @@ use std::sync::Arc;
 
 use crate::token_data::TokenData;
 
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ChatGptAuthEntry {
+    pub id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub tokens: TokenData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ApiKeyAuthEntry {
+    pub id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub api_key: String,
+}
+
 /// Determine where Codex should store CLI auth credentials.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,6 +47,12 @@ pub enum AuthCredentialsStoreMode {
 pub struct AuthDotJson {
     #[serde(rename = "OPENAI_API_KEY")]
     pub openai_api_key: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chatgpt_entries: Vec<ChatGptAuthEntry>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<ApiKeyAuthEntry>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<TokenData>,
@@ -134,6 +158,8 @@ mod tests {
         let storage = FileAuthStorage::new(codex_home.path().to_path_buf());
         let auth_dot_json = AuthDotJson {
             openai_api_key: Some("test-key".to_string()),
+            chatgpt_entries: Vec::new(),
+            api_keys: Vec::new(),
             tokens: None,
             last_refresh: Some(Utc::now()),
         };
@@ -153,6 +179,8 @@ mod tests {
         let storage = FileAuthStorage::new(codex_home.path().to_path_buf());
         let auth_dot_json = AuthDotJson {
             openai_api_key: Some("test-key".to_string()),
+            chatgpt_entries: Vec::new(),
+            api_keys: Vec::new(),
             tokens: None,
             last_refresh: Some(Utc::now()),
         };
@@ -174,6 +202,8 @@ mod tests {
         let dir = tempdir()?;
         let auth_dot_json = AuthDotJson {
             openai_api_key: Some("sk-test-key".to_string()),
+            chatgpt_entries: Vec::new(),
+            api_keys: Vec::new(),
             tokens: None,
             last_refresh: None,
         };

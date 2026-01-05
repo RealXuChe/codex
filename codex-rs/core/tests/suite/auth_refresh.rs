@@ -182,6 +182,8 @@ impl RefreshTokenTestContext {
         };
         let auth_dot_json = AuthDotJson {
             openai_api_key: None,
+            chatgpt_entries: Vec::new(),
+            api_keys: Vec::new(),
             tokens: Some(tokens),
             last_refresh: Some(initial_last_refresh),
         };
