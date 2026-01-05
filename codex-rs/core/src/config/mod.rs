@@ -2939,7 +2939,6 @@ model = "gpt-5.1-codex"
         cfg: ConfigToml,
         model_provider_map: HashMap<String, ModelProviderInfo>,
         openai_provider: ModelProviderInfo,
-        openai_chat_completions_provider: ModelProviderInfo,
     }
 
     impl PrecedenceTestFixture {
@@ -3018,15 +3017,6 @@ approval_policy = "untrusted"
 # `ConfigOverrides`.
 profile = "gpt3"
 
-[model_providers.openai-chat-completions]
-name = "OpenAI using Chat Completions"
-base_url = "https://api.openai.com/v1"
-env_key = "OPENAI_API_KEY"
-wire_api = "chat"
-request_max_retries = 4            # retry failed HTTP requests
-stream_max_retries = 10            # retry dropped SSE streams
-stream_idle_timeout_ms = 300000    # 5m idle timeout
-
 [profiles.o3]
 model = "o3"
 model_provider = "openai"
@@ -3036,7 +3026,7 @@ model_reasoning_summary = "detailed"
 
 [profiles.gpt3]
 model = "gpt-3.5-turbo"
-model_provider = "openai-chat-completions"
+model_provider = "openai"
 
 [profiles.zdr]
 model = "o3"
@@ -3064,29 +3054,7 @@ model_verbosity = "high"
 
         let codex_home_temp_dir = TempDir::new().unwrap();
 
-        let openai_chat_completions_provider = ModelProviderInfo {
-            name: "OpenAI using Chat Completions".to_string(),
-            base_url: Some("https://api.openai.com/v1".to_string()),
-            env_key: Some("OPENAI_API_KEY".to_string()),
-            wire_api: crate::WireApi::Chat,
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(4),
-            stream_max_retries: Some(10),
-            stream_idle_timeout_ms: Some(300_000),
-            requires_openai_auth: false,
-        };
-        let model_provider_map = {
-            let mut model_provider_map = built_in_model_providers();
-            model_provider_map.insert(
-                "openai-chat-completions".to_string(),
-                openai_chat_completions_provider.clone(),
-            );
-            model_provider_map
-        };
+        let model_provider_map = built_in_model_providers();
 
         let openai_provider = model_provider_map
             .get("openai")
@@ -3099,7 +3067,6 @@ model_verbosity = "high"
             cfg,
             model_provider_map,
             openai_provider,
-            openai_chat_completions_provider,
         })
     }
 
@@ -3217,8 +3184,8 @@ model_verbosity = "high"
             review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
             model_context_window: None,
             model_auto_compact_token_limit: None,
-            model_provider_id: "openai-chat-completions".to_string(),
-            model_provider: fixture.openai_chat_completions_provider.clone(),
+            model_provider_id: "openai".to_string(),
+            model_provider: fixture.openai_provider.clone(),
             approval_policy: Constrained::allow_any(AskForApproval::UnlessTrusted),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,

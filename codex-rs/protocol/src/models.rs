@@ -83,7 +83,7 @@ pub enum ResponseItem {
         encrypted_content: Option<String>,
     },
     LocalShellCall {
-        /// Set when using the chat completions API.
+        /// Legacy id field retained for backwards compatibility.
         #[serde(default, skip_serializing)]
         #[ts(skip)]
         id: Option<String>,
@@ -100,7 +100,7 @@ pub enum ResponseItem {
         // The Responses API returns the function call arguments as a *string* that contains
         // JSON, not as an already‑parsed object. We keep it as a raw string here and let
         // Session::handle_function_call parse it into a Value. This exactly matches the
-        // Chat Completions + Responses API behavior.
+        // Responses API behavior.
         arguments: String,
         call_id: String,
     },

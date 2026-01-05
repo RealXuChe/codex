@@ -29,7 +29,7 @@ use core_test_support::skip_if_no_network;
 use mcp_test_support::McpProcess;
 use mcp_test_support::create_apply_patch_sse_response;
 use mcp_test_support::create_final_assistant_message_sse_response;
-use mcp_test_support::create_mock_chat_completions_server;
+use mcp_test_support::create_mock_responses_server;
 use mcp_test_support::create_shell_command_sse_response;
 use mcp_test_support::format_with_current_shell;
 
@@ -334,10 +334,8 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
     #![expect(clippy::unwrap_used)]
 
     let server =
-        create_mock_chat_completions_server(vec![create_final_assistant_message_sse_response(
-            "Enjoy!",
-        )?])
-        .await;
+        create_mock_responses_server(vec![create_final_assistant_message_sse_response("Enjoy!")?])
+            .await;
 
     // Run `codex mcp` with a specific config.toml.
     let codex_home = TempDir::new()?;
@@ -378,21 +376,17 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
 
     let requests = server.received_requests().await.unwrap();
     let request = requests[0].body_json::<serde_json::Value>()?;
-    let instructions = request["messages"][0]["content"].as_str().unwrap();
+    let instructions = request["instructions"].as_str().unwrap();
     assert!(instructions.starts_with("You are a helpful assistant."));
 
-    let developer_msg = request["messages"]
+    let developer_msg = request["input"]
         .as_array()
-        .and_then(|messages| {
-            messages
-                .iter()
-                .find(|msg| msg.get("role").and_then(|role| role.as_str()) == Some("developer"))
-        })
+        .unwrap()
+        .iter()
+        .find(|msg| msg.get("role").and_then(|role| role.as_str()) == Some("developer"))
         .unwrap();
-    let developer_content = developer_msg
-        .get("content")
-        .and_then(|value| value.as_str())
-        .unwrap();
+    let developer_content = developer_msg["content"].as_array().unwrap();
+    let developer_content = developer_content[0]["text"].as_str().unwrap();
     assert!(
         !developer_content.contains('<'),
         "expected developer instructions without XML tags, got `{developer_content}`"
@@ -451,7 +445,7 @@ pub struct McpHandle {
 }
 
 async fn create_mcp_process(responses: Vec<String>) -> anyhow::Result<McpHandle> {
-    let server = create_mock_chat_completions_server(responses).await;
+    let server = create_mock_responses_server(responses).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
     let mut mcp_process = McpProcess::new(codex_home.path()).await?;
@@ -481,7 +475,7 @@ model_provider = "mock_provider"
 [model_providers.mock_provider]
 name = "Mock provider for test"
 base_url = "{server_uri}/v1"
-wire_api = "chat"
+wire_api = "responses"
 request_max_retries = 0
 stream_max_retries = 0
 "#
