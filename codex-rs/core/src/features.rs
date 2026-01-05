@@ -76,10 +76,6 @@ pub enum Feature {
     WebSearchRequest,
     /// Gate the execpolicy enforcement for shell/unified exec.
     ExecPolicy,
-    /// Enable Windows sandbox (restricted token) on Windows.
-    WindowsSandbox,
-    /// Use the elevated Windows sandbox pipeline (setup + runner).
-    WindowsSandboxElevated,
     /// Remote compaction enabled (only for ChatGPT auth)
     RemoteCompaction,
     /// Refresh remote models and emit AppReady once the list is available.
@@ -362,18 +358,6 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "exec_policy",
         stage: Stage::Experimental,
         default_enabled: true,
-    },
-    FeatureSpec {
-        id: Feature::WindowsSandbox,
-        key: "experimental_windows_sandbox",
-        stage: Stage::Experimental,
-        default_enabled: false,
-    },
-    FeatureSpec {
-        id: Feature::WindowsSandboxElevated,
-        key: "elevated_windows_sandbox",
-        stage: Stage::Experimental,
-        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::RemoteCompaction,

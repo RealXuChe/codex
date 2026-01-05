@@ -20,7 +20,6 @@ use codex_core::config::find_codex_home;
 use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::config::resolve_oss_provider;
 use codex_core::find_conversation_path_by_id_str;
-use codex_core::get_platform_sandbox;
 use codex_core::protocol::AskForApproval;
 use codex_protocol::config_types::SandboxMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -568,10 +567,6 @@ async fn load_config_or_exit(
 /// or if the current cwd project is already trusted. If not, we need to
 /// show the trust screen.
 fn should_show_trust_screen(config: &Config) -> bool {
-    if cfg!(target_os = "windows") && get_platform_sandbox().is_none() {
-        // If the experimental sandbox is not enabled, Native Windows cannot enforce sandboxed write access; skip the trust prompt entirely.
-        return false;
-    }
     if config.did_user_set_custom_approval_policy_or_sandbox_mode {
         // Respect explicit approval/sandbox overrides made by the user.
         return false;
@@ -607,7 +602,7 @@ mod tests {
     use super::*;
     use codex_core::config::ConfigBuilder;
     use codex_core::config::ProjectConfig;
-    use serial_test::serial;
+
     use tempfile::TempDir;
 
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
@@ -617,52 +612,6 @@ mod tests {
             .await
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn windows_skips_trust_prompt_without_sandbox() -> std::io::Result<()> {
-        let temp_dir = TempDir::new()?;
-        let mut config = build_config(&temp_dir).await?;
-        config.did_user_set_custom_approval_policy_or_sandbox_mode = false;
-        config.active_project = ProjectConfig { trust_level: None };
-        config.set_windows_sandbox_globally(false);
-
-        let should_show = should_show_trust_screen(&config);
-        if cfg!(target_os = "windows") {
-            assert!(
-                !should_show,
-                "Windows trust prompt should always be skipped on native Windows"
-            );
-        } else {
-            assert!(
-                should_show,
-                "Non-Windows should still show trust prompt when project is untrusted"
-            );
-        }
-        Ok(())
-    }
-    #[tokio::test]
-    #[serial]
-    async fn windows_shows_trust_prompt_with_sandbox() -> std::io::Result<()> {
-        let temp_dir = TempDir::new()?;
-        let mut config = build_config(&temp_dir).await?;
-        config.did_user_set_custom_approval_policy_or_sandbox_mode = false;
-        config.active_project = ProjectConfig { trust_level: None };
-        config.set_windows_sandbox_globally(true);
-
-        let should_show = should_show_trust_screen(&config);
-        if cfg!(target_os = "windows") {
-            assert!(
-                should_show,
-                "Windows trust prompt should be shown on native Windows with sandbox enabled"
-            );
-        } else {
-            assert!(
-                should_show,
-                "Non-Windows should still show trust prompt when project is untrusted"
-            );
-        }
-        Ok(())
-    }
     #[tokio::test]
     async fn untrusted_project_skips_trust_prompt() -> std::io::Result<()> {
         use codex_protocol::config_types::TrustLevel;

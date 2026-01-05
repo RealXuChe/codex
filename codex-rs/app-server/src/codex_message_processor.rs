@@ -1267,15 +1267,7 @@ impl CodexMessageProcessor {
             ..Default::default()
         };
 
-        // Persist windows sandbox feature.
-        // TODO: persist default config in general.
-        let mut cli_overrides = cli_overrides.unwrap_or_default();
-        if cfg!(windows) && self.config.features.enabled(Feature::WindowsSandbox) {
-            cli_overrides.insert(
-                "features.experimental_windows_sandbox".to_string(),
-                serde_json::json!(true),
-            );
-        }
+        let cli_overrides = cli_overrides.unwrap_or_default();
 
         let config = match derive_config_from_params(overrides, Some(cli_overrides)).await {
             Ok(config) => config,
@@ -2203,14 +2195,7 @@ impl CodexMessageProcessor {
                     include_apply_patch_tool,
                 } = overrides;
 
-                // Persist windows sandbox feature.
-                let mut cli_overrides = cli_overrides.unwrap_or_default();
-                if cfg!(windows) && self.config.features.enabled(Feature::WindowsSandbox) {
-                    cli_overrides.insert(
-                        "features.experimental_windows_sandbox".to_string(),
-                        serde_json::json!(true),
-                    );
-                }
+                let cli_overrides = cli_overrides.unwrap_or_default();
 
                 let overrides = ConfigOverrides {
                     model,

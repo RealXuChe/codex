@@ -80,8 +80,7 @@ impl SandboxManager {
         match pref {
             SandboxablePreference::Forbid => SandboxType::None,
             SandboxablePreference::Require => {
-                // Require a platform sandbox when available; on Windows this
-                // respects the experimental_windows_sandbox feature.
+                // Require a platform sandbox when available.
                 crate::safety::get_platform_sandbox().unwrap_or(SandboxType::None)
             }
             SandboxablePreference::Auto => match policy {
@@ -142,14 +141,6 @@ impl SandboxManager {
                     Some("codex-linux-sandbox".to_string()),
                 )
             }
-            // On Windows, the restricted token sandbox executes in-process via the
-            // codex-windows-sandbox crate. We leave the command unchanged here and
-            // branch during execution based on the sandbox type.
-            #[cfg(target_os = "windows")]
-            SandboxType::WindowsRestrictedToken => (command, HashMap::new(), None),
-            // When building for non-Windows targets, this variant is never constructed.
-            #[cfg(not(target_os = "windows"))]
-            SandboxType::WindowsRestrictedToken => (command, HashMap::new(), None),
         };
 
         env.extend(sandbox_env);

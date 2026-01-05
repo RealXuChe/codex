@@ -8,7 +8,6 @@ use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::LandlockCommand;
 use codex_cli::SeatbeltCommand;
-use codex_cli::WindowsCommand;
 use codex_cli::login::read_api_key_from_stdin;
 use codex_cli::login::run_login_status;
 use codex_cli::login::run_login_with_api_key;
@@ -169,9 +168,6 @@ enum SandboxCommand {
     /// Run a command under Landlock+seccomp (Linux only).
     #[clap(visible_alias = "landlock")]
     Linux(LandlockCommand),
-
-    /// Run a command under Windows restricted token (Windows only).
-    Windows(WindowsCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -564,17 +560,6 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 );
                 codex_cli::debug_sandbox::run_command_under_landlock(
                     landlock_cli,
-                    codex_linux_sandbox_exe,
-                )
-                .await?;
-            }
-            SandboxCommand::Windows(mut windows_cli) => {
-                prepend_config_flags(
-                    &mut windows_cli.config_overrides,
-                    root_config_overrides.clone(),
-                );
-                codex_cli::debug_sandbox::run_command_under_windows(
-                    windows_cli,
                     codex_linux_sandbox_exe,
                 )
                 .await?;

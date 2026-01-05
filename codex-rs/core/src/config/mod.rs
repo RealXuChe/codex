@@ -125,10 +125,6 @@ pub struct Config {
     /// for either of approval_policy or sandbox_mode.
     pub did_user_set_custom_approval_policy_or_sandbox_mode: bool,
 
-    /// On Windows, indicates that a previously configured workspace-write sandbox
-    /// was coerced to read-only because native auto mode is unsupported.
-    pub forced_auto_mode_downgraded_on_windows: bool,
-
     pub shell_environment_policy: ShellEnvironmentPolicy,
 
     /// When `true`, `AgentReasoning` events emitted by the backend will be
@@ -899,7 +895,6 @@ pub struct GhostSnapshotToml {
 #[derive(Debug, PartialEq, Eq)]
 pub struct SandboxPolicyResolution {
     pub policy: SandboxPolicy,
-    pub forced_auto_mode_downgraded_on_windows: bool,
 }
 
 impl ConfigToml {
@@ -924,7 +919,7 @@ impl ConfigToml {
                 })
             })
             .unwrap_or_default();
-        let mut sandbox_policy = match resolved_sandbox_mode {
+        let sandbox_policy = match resolved_sandbox_mode {
             SandboxMode::ReadOnly => SandboxPolicy::new_read_only_policy(),
             SandboxMode::WorkspaceWrite => match self.sandbox_workspace_write.as_ref() {
                 Some(SandboxWorkspaceWrite {
@@ -942,18 +937,8 @@ impl ConfigToml {
             },
             SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
         };
-        let mut forced_auto_mode_downgraded_on_windows = false;
-        if cfg!(target_os = "windows")
-            && matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite)
-            // If the experimental Windows sandbox is enabled, do not force a downgrade.
-            && crate::safety::get_platform_sandbox().is_none()
-        {
-            sandbox_policy = SandboxPolicy::new_read_only_policy();
-            forced_auto_mode_downgraded_on_windows = true;
-        }
         SandboxPolicyResolution {
             policy: sandbox_policy,
-            forced_auto_mode_downgraded_on_windows,
         }
     }
 
@@ -1114,15 +1099,6 @@ impl Config {
         };
 
         let features = Features::from_config(&cfg, &config_profile, feature_overrides);
-        #[cfg(target_os = "windows")]
-        {
-            // Base flag controls sandbox on/off; elevated only applies when base is enabled.
-            let sandbox_enabled = features.enabled(Feature::WindowsSandbox);
-            crate::safety::set_windows_sandbox_enabled(sandbox_enabled);
-            let elevated_enabled =
-                sandbox_enabled && features.enabled(Feature::WindowsSandboxElevated);
-            crate::safety::set_windows_elevated_sandbox_enabled(elevated_enabled);
-        }
 
         let resolved_cwd = {
             use std::env;
@@ -1152,7 +1128,6 @@ impl Config {
 
         let SandboxPolicyResolution {
             policy: mut sandbox_policy,
-            forced_auto_mode_downgraded_on_windows,
         } = cfg.derive_sandbox_policy(sandbox_mode, config_profile.sandbox_mode, &resolved_cwd);
         if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
             for path in additional_writable_roots {
@@ -1305,7 +1280,6 @@ impl Config {
             approval_policy: constrained_approval_policy,
             sandbox_policy: constrained_sandbox_policy,
             did_user_set_custom_approval_policy_or_sandbox_mode,
-            forced_auto_mode_downgraded_on_windows,
             shell_environment_policy,
             notify: cfg.notify,
             user_instructions,
@@ -1461,16 +1435,6 @@ impl Config {
             Ok(Some(s))
         }
     }
-
-    pub fn set_windows_sandbox_globally(&mut self, value: bool) {
-        crate::safety::set_windows_sandbox_enabled(value);
-        if value {
-            self.features.enable(Feature::WindowsSandbox);
-        } else {
-            self.features.disable(Feature::WindowsSandbox);
-        }
-        self.forced_auto_mode_downgraded_on_windows = !value;
-    }
 }
 
 fn default_review_model() -> String {
@@ -1610,7 +1574,6 @@ network_access = false  # This should be ignored.
             resolution,
             SandboxPolicyResolution {
                 policy: SandboxPolicy::DangerFullAccess,
-                forced_auto_mode_downgraded_on_windows: false,
             }
         );
 
@@ -1633,7 +1596,6 @@ network_access = true  # This should be ignored.
             resolution,
             SandboxPolicyResolution {
                 policy: SandboxPolicy::ReadOnly,
-                forced_auto_mode_downgraded_on_windows: false,
             }
         );
 
@@ -1660,28 +1622,17 @@ exclude_slash_tmp = true
             None,
             &PathBuf::from("/tmp/test"),
         );
-        if cfg!(target_os = "windows") {
-            assert_eq!(
-                resolution,
-                SandboxPolicyResolution {
-                    policy: SandboxPolicy::ReadOnly,
-                    forced_auto_mode_downgraded_on_windows: true,
-                }
-            );
-        } else {
-            assert_eq!(
-                resolution,
-                SandboxPolicyResolution {
-                    policy: SandboxPolicy::WorkspaceWrite {
-                        writable_roots: vec![writable_root.clone()],
-                        network_access: false,
-                        exclude_tmpdir_env_var: true,
-                        exclude_slash_tmp: true,
-                    },
-                    forced_auto_mode_downgraded_on_windows: false,
-                }
-            );
-        }
+        assert_eq!(
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![writable_root.clone()],
+                    network_access: false,
+                    exclude_tmpdir_env_var: true,
+                    exclude_slash_tmp: true,
+                },
+            }
+        );
 
         let sandbox_workspace_write = format!(
             r#"
@@ -1708,28 +1659,17 @@ trust_level = "trusted"
             None,
             &PathBuf::from("/tmp/test"),
         );
-        if cfg!(target_os = "windows") {
-            assert_eq!(
-                resolution,
-                SandboxPolicyResolution {
-                    policy: SandboxPolicy::ReadOnly,
-                    forced_auto_mode_downgraded_on_windows: true,
-                }
-            );
-        } else {
-            assert_eq!(
-                resolution,
-                SandboxPolicyResolution {
-                    policy: SandboxPolicy::WorkspaceWrite {
-                        writable_roots: vec![writable_root],
-                        network_access: false,
-                        exclude_tmpdir_env_var: true,
-                        exclude_slash_tmp: true,
-                    },
-                    forced_auto_mode_downgraded_on_windows: false,
-                }
-            );
-        }
+        assert_eq!(
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![writable_root],
+                    network_access: false,
+                    exclude_tmpdir_env_var: true,
+                    exclude_slash_tmp: true,
+                },
+            }
+        );
     }
 
     #[test]
@@ -1754,30 +1694,19 @@ trust_level = "trusted"
         )?;
 
         let expected_backend = AbsolutePathBuf::try_from(backend).unwrap();
-        if cfg!(target_os = "windows") {
-            assert!(
-                config.forced_auto_mode_downgraded_on_windows,
-                "expected workspace-write request to be downgraded on Windows"
-            );
-            match config.sandbox_policy.get() {
-                &SandboxPolicy::ReadOnly => {}
-                other => panic!("expected read-only policy on Windows, got {other:?}"),
+        match config.sandbox_policy.get() {
+            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
+                assert_eq!(
+                    writable_roots
+                        .iter()
+                        .filter(|root| **root == expected_backend)
+                        .count(),
+                    1,
+                    "expected single writable root entry for {}",
+                    expected_backend.display()
+                );
             }
-        } else {
-            match config.sandbox_policy.get() {
-                SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
-                    assert_eq!(
-                        writable_roots
-                            .iter()
-                            .filter(|root| **root == expected_backend)
-                            .count(),
-                        1,
-                        "expected single writable root entry for {}",
-                        expected_backend.display()
-                    );
-                }
-                other => panic!("expected workspace-write policy, got {other:?}"),
-            }
+            other => panic!("expected workspace-write policy, got {other:?}"),
         }
 
         Ok(())
@@ -1932,19 +1861,10 @@ trust_level = "trusted"
             codex_home.path().to_path_buf(),
         )?;
 
-        if cfg!(target_os = "windows") {
-            assert!(matches!(
-                config.sandbox_policy.get(),
-                SandboxPolicy::ReadOnly
-            ));
-            assert!(config.forced_auto_mode_downgraded_on_windows);
-        } else {
-            assert!(matches!(
-                config.sandbox_policy.get(),
-                SandboxPolicy::WorkspaceWrite { .. }
-            ));
-            assert!(!config.forced_auto_mode_downgraded_on_windows);
-        }
+        assert!(matches!(
+            config.sandbox_policy.get(),
+            SandboxPolicy::WorkspaceWrite { .. }
+        ));
 
         Ok(())
     }
@@ -3107,7 +3027,6 @@ model_verbosity = "high"
                 approval_policy: Constrained::allow_any(AskForApproval::Never),
                 sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
-                forced_auto_mode_downgraded_on_windows: false,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 user_instructions: None,
                 notify: None,
@@ -3189,7 +3108,6 @@ model_verbosity = "high"
             approval_policy: Constrained::allow_any(AskForApproval::UnlessTrusted),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
-            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
@@ -3286,7 +3204,6 @@ model_verbosity = "high"
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
-            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
@@ -3369,7 +3286,6 @@ model_verbosity = "high"
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
-            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
