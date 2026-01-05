@@ -212,18 +212,6 @@ function findCodexPath() {
           break;
       }
       break;
-    case "darwin":
-      switch (arch) {
-        case "x64":
-          targetTriple = "x86_64-apple-darwin";
-          break;
-        case "arm64":
-          targetTriple = "aarch64-apple-darwin";
-          break;
-        default:
-          break;
-      }
-      break;
     case "win32":
       switch (arch) {
         case "x64":

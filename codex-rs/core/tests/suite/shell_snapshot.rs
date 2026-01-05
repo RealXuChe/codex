@@ -346,39 +346,6 @@ async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_os = "macos"), ignore)]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "requires unrestricted networking on macOS"
-)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn macos_unified_exec_uses_shell_snapshot() -> Result<()> {
-    let command = "echo snapshot-macos";
-    let run = run_snapshot_command(command).await?;
-
-    let shell_path = run
-        .begin
-        .command
-        .first()
-        .expect("shell path recorded")
-        .clone();
-    assert_eq!(run.begin.command.get(1).map(String::as_str), Some("-c"));
-    assert_eq!(
-        run.begin.command.get(2).map(String::as_str),
-        Some(". \"$0\" && exec \"$@\"")
-    );
-    assert_eq!(run.begin.command.get(4), Some(&shell_path));
-    assert_eq!(run.begin.command.get(5).map(String::as_str), Some("-c"));
-    assert_eq!(run.begin.command.last(), Some(&command.to_string()));
-
-    assert!(run.snapshot_path.starts_with(&run.codex_home));
-    assert_posix_snapshot_sections(&run.snapshot_content);
-    assert_eq!(normalize_newlines(&run.end.stdout).trim(), "snapshot-macos");
-    assert_eq!(run.end.exit_code, 0);
-
-    Ok(())
-}
-
 // #[cfg_attr(not(target_os = "windows"), ignore)]
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

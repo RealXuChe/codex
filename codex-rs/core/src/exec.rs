@@ -110,9 +110,6 @@ impl ExecExpiration {
 pub enum SandboxType {
     None,
 
-    /// Only available on macOS.
-    MacosSeatbelt,
-
     /// Only available on Linux.
     LinuxSeccomp,
 }
@@ -282,10 +279,6 @@ pub(crate) mod errors {
                 SandboxTransformError::MissingLinuxSandboxExecutable => {
                     CodexErr::LandlockSandboxExecutableNotProvided
                 }
-                #[cfg(not(target_os = "macos"))]
-                SandboxTransformError::SeatbeltUnavailable => CodexErr::UnsupportedOperation(
-                    "seatbelt sandbox is only available on macOS".to_string(),
-                ),
             }
         }
     }
@@ -729,10 +722,7 @@ mod tests {
             "",
             "cargo failed: Read-only file system when writing target",
         );
-        assert!(is_likely_sandbox_denied(
-            SandboxType::MacosSeatbelt,
-            &output
-        ));
+        assert!(is_likely_sandbox_denied(SandboxType::LinuxSeccomp, &output));
     }
 
     #[cfg(unix)]

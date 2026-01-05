@@ -1,8 +1,6 @@
 mod config_requirements;
 mod fingerprint;
 mod layer_io;
-#[cfg(target_os = "macos")]
-mod macos;
 mod merge;
 mod overrides;
 mod state;
@@ -61,8 +59,6 @@ const DEFAULT_PROJECT_ROOT_MARKERS: &[&str] = &[".git"];
 /// - tree      parent directories up to root looking for `./.codex/config.toml`
 /// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml`
 /// - runtime   e.g., --config flags, model selector in UI
-///
-/// (*) Only available on macOS via managed device profiles.
 ///
 /// See https://developers.openai.com/codex/security for details.
 ///
@@ -169,10 +165,7 @@ pub async fn load_config_layers_state(
     // `managed_config.toml` that do not have an equivalent in
     // `ConfigRequirements`, note users can still override these values on a
     // per-turn basis in the TUI and VS Code.
-    let LoadedConfigLayers {
-        managed_config,
-        managed_config_from_mdm,
-    } = loaded_config_layers;
+    let LoadedConfigLayers { managed_config } = loaded_config_layers;
     if let Some(config) = managed_config {
         let managed_parent = config.file.as_path().parent().ok_or_else(|| {
             io::Error::new(
@@ -188,12 +181,6 @@ pub async fn load_config_layers_state(
         layers.push(ConfigLayerEntry::new(
             ConfigLayerSource::LegacyManagedConfigTomlFromFile { file: config.file },
             managed_config,
-        ));
-    }
-    if let Some(config) = managed_config_from_mdm {
-        layers.push(ConfigLayerEntry::new(
-            ConfigLayerSource::LegacyManagedConfigTomlFromMdm,
-            config,
         ));
     }
 
@@ -289,17 +276,8 @@ async fn load_requirements_from_legacy_scheme(
     // In this implementation, earlier layers cannot be overwritten by later
     // layers, so list managed_config_from_mdm first because it has the highest
     // precedence.
-    let LoadedConfigLayers {
-        managed_config,
-        managed_config_from_mdm,
-    } = loaded_config_layers;
-    for config in [
-        managed_config_from_mdm,
-        managed_config.map(|c| c.managed_config),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    let LoadedConfigLayers { managed_config } = loaded_config_layers;
+    for config in managed_config.map(|c| c.managed_config).into_iter() {
         let legacy_config: LegacyManagedConfigToml =
             config.try_into().map_err(|err: toml::de::Error| {
                 io::Error::new(

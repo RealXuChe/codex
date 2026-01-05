@@ -84,9 +84,7 @@ pub fn assess_patch_safety(
 }
 
 pub fn get_platform_sandbox() -> Option<SandboxType> {
-    if cfg!(target_os = "macos") {
-        Some(SandboxType::MacosSeatbelt)
-    } else if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") {
         Some(SandboxType::LinuxSeccomp)
     } else {
         None

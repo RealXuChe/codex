@@ -298,10 +298,6 @@ async fn context_indicator_shows_used_tokens_when_window_unknown() {
     );
 }
 
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "system configuration APIs are blocked under macOS seatbelt"
-)]
 #[tokio::test]
 async fn helpers_are_available_and_do_not_panic() {
     let (tx_raw, _rx) = unbounded_channel::<AppEvent>();

@@ -11,28 +11,6 @@ use std::process::ExitStatus;
 use tokio::fs::create_dir_all;
 use tokio::process::Child;
 
-#[cfg(target_os = "macos")]
-async fn spawn_command_under_sandbox(
-    command: Vec<String>,
-    command_cwd: PathBuf,
-    sandbox_policy: &SandboxPolicy,
-    sandbox_cwd: &Path,
-    stdio_policy: StdioPolicy,
-    env: HashMap<String, String>,
-) -> std::io::Result<Child> {
-    use codex_core::seatbelt::spawn_command_under_seatbelt;
-    spawn_command_under_seatbelt(
-        command,
-        command_cwd,
-        sandbox_policy,
-        sandbox_cwd,
-        stdio_policy,
-        env,
-    )
-    .await
-}
-
-#[cfg(target_os = "linux")]
 async fn spawn_command_under_sandbox(
     command: Vec<String>,
     command_cwd: PathBuf,
@@ -59,14 +37,10 @@ async fn spawn_command_under_sandbox(
 #[tokio::test]
 async fn python_multiprocessing_lock_works_under_sandbox() {
     core_test_support::skip_if_sandbox!();
-    #[cfg(target_os = "macos")]
-    let writable_roots = Vec::<AbsolutePathBuf>::new();
-
     // From https://man7.org/linux/man-pages/man7/sem_overview.7.html
     //
     // > On Linux, named semaphores are created in a virtual filesystem,
     // > normally mounted under /dev/shm.
-    #[cfg(target_os = "linux")]
     let writable_roots: Vec<AbsolutePathBuf> = vec!["/dev/shm".try_into().unwrap()];
 
     let policy = SandboxPolicy::WorkspaceWrite {

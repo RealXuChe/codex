@@ -1,5 +1,5 @@
-import { selectDarwinBash, selectLinuxBash } from "../src/bashSelection";
-import { DARWIN_BASH_VARIANTS, LINUX_BASH_VARIANTS } from "../src/constants";
+import { selectLinuxBash } from "../src/bashSelection";
+import { LINUX_BASH_VARIANTS } from "../src/constants";
 import { OsReleaseInfo } from "../src/types";
 import path from "node:path";
 
@@ -21,21 +21,5 @@ describe("selectLinuxBash", () => {
     const info: OsReleaseInfo = { id: "unknown", idLike: [], versionId: "1.0" };
     const selection = selectLinuxBash(bashRoot, info);
     expect(selection.variant).toBe(LINUX_BASH_VARIANTS[0].name);
-  });
-});
-
-describe("selectDarwinBash", () => {
-  const bashRoot = "/vendor/bash";
-
-  it("selects compatible darwin version", () => {
-    const darwinRelease = "24.0.0";
-    const selection = selectDarwinBash(bashRoot, darwinRelease);
-    expect(selection.variant).toBe("macos-15");
-  });
-
-  it("falls back to first darwin variant when release too old", () => {
-    const darwinRelease = "20.0.0";
-    const selection = selectDarwinBash(bashRoot, darwinRelease);
-    expect(selection.variant).toBe(DARWIN_BASH_VARIANTS[0].name);
   });
 });

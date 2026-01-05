@@ -15,8 +15,6 @@ use toml::Value as TomlValue;
 #[derive(Debug, Default, Clone)]
 pub struct LoaderOverrides {
     pub managed_config_path: Option<PathBuf>,
-    #[cfg(target_os = "macos")]
-    pub managed_preferences_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

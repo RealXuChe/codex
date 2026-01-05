@@ -19,14 +19,6 @@ function determineTargetTriple(platform, arch) {
         return "aarch64-unknown-linux-musl";
       }
       break;
-    case "darwin":
-      if (arch === "x64") {
-        return "x86_64-apple-darwin";
-      }
-      if (arch === "arm64") {
-        return "aarch64-apple-darwin";
-      }
-      break;
     case "win32":
       if (arch === "x64") {
         return "x86_64-pc-windows-msvc";

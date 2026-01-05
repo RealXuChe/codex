@@ -7,7 +7,6 @@ use codex_arg0::arg0_dispatch_or_else;
 use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::LandlockCommand;
-use codex_cli::SeatbeltCommand;
 use codex_cli::login::read_api_key_from_stdin;
 use codex_cli::login::run_login_status;
 use codex_cli::login::run_login_with_api_key;
@@ -161,10 +160,6 @@ struct SandboxArgs {
 
 #[derive(Debug, clap::Subcommand)]
 enum SandboxCommand {
-    /// Run a command under Seatbelt (macOS only).
-    #[clap(visible_alias = "seatbelt")]
-    Macos(SeatbeltCommand),
-
     /// Run a command under Landlock+seccomp (Linux only).
     #[clap(visible_alias = "landlock")]
     Linux(LandlockCommand),
@@ -542,17 +537,6 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             print_completion(completion_cli);
         }
         Some(Subcommand::Sandbox(sandbox_args)) => match sandbox_args.cmd {
-            SandboxCommand::Macos(mut seatbelt_cli) => {
-                prepend_config_flags(
-                    &mut seatbelt_cli.config_overrides,
-                    root_config_overrides.clone(),
-                );
-                codex_cli::debug_sandbox::run_command_under_seatbelt(
-                    seatbelt_cli,
-                    codex_linux_sandbox_exe,
-                )
-                .await?;
-            }
             SandboxCommand::Linux(mut landlock_cli) => {
                 prepend_config_flags(
                     &mut landlock_cli.config_overrides,

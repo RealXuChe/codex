@@ -1,4 +1,4 @@
-import { DarwinBashVariant, LinuxBashVariant } from "./types";
+import { LinuxBashVariant } from "./types";
 
 export const LINUX_BASH_VARIANTS: ReadonlyArray<LinuxBashVariant> = [
   { name: "ubuntu-24.04", ids: ["ubuntu"], versions: ["24.04"] },
@@ -11,10 +11,4 @@ export const LINUX_BASH_VARIANTS: ReadonlyArray<LinuxBashVariant> = [
     ids: ["centos", "rhel", "rocky", "almalinux"],
     versions: ["9"],
   },
-];
-
-export const DARWIN_BASH_VARIANTS: ReadonlyArray<DarwinBashVariant> = [
-  { name: "macos-15", minDarwin: 24 },
-  { name: "macos-14", minDarwin: 23 },
-  { name: "macos-13", minDarwin: 22 },
 ];

@@ -11,7 +11,7 @@ npm i -g @openai/codex
 codex
 ```
 
-You can also install via Homebrew (`brew install --cask codex`) or download a platform-specific release directly from our [GitHub Releases](https://github.com/openai/codex/releases).
+You can also download a platform-specific release directly from our [GitHub Releases](https://github.com/openai/codex/releases).
 
 ## Documentation quickstart
 
@@ -57,18 +57,8 @@ To run Codex non-interactively, run `codex exec PROMPT` (you can also pass the p
 To test to see what happens when a command is run under the sandbox provided by Codex, we provide the following subcommands in Codex CLI:
 
 ```
-# macOS
-codex sandbox macos [--full-auto] [--log-denials] [COMMAND]...
-
 # Linux
 codex sandbox linux [--full-auto] [COMMAND]...
-
-# Windows
-codex sandbox windows [--full-auto] [COMMAND]...
-
-# Legacy aliases
-codex debug seatbelt [--full-auto] [--log-denials] [COMMAND]...
-codex debug landlock [--full-auto] [COMMAND]...
 ```
 
 ### Selecting a sandbox policy via `--sandbox`

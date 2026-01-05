@@ -1,4 +1,3 @@
-use crate::spawn::CODEX_SANDBOX_ENV_VAR;
 use codex_client::CodexHttpClient;
 pub use codex_client::CodexRequestBuilder;
 use reqwest::header::HeaderValue;
@@ -140,19 +139,12 @@ pub fn build_reqwest_client() -> reqwest::Client {
     headers.insert("originator", originator().header_value.clone());
     let ua = get_codex_user_agent();
 
-    let mut builder = reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         // Set UA via dedicated helper to avoid header validation pitfalls
         .user_agent(ua)
         .default_headers(headers);
-    if is_sandboxed() {
-        builder = builder.no_proxy();
-    }
 
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
-}
-
-fn is_sandboxed() -> bool {
-    std::env::var(CODEX_SANDBOX_ENV_VAR).as_deref() == Ok("seatbelt")
 }
 
 #[cfg(test)]
@@ -236,18 +228,5 @@ mod tests {
             sanitize_user_agent(format!("{prefix} ({suffix})"), prefix),
             "codex_cli_rs/0.0.0 (bad_suffix)"
         );
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_macos() {
-        use regex_lite::Regex;
-        let user_agent = get_codex_user_agent();
-        let originator = regex_lite::escape(originator().value.as_str());
-        let re = Regex::new(&format!(
-            r"^{originator}/\d+\.\d+\.\d+ \(Mac OS \d+\.\d+\.\d+; (x86_64|arm64)\) (\S+)$"
-        ))
-        .unwrap();
-        assert!(re.is_match(&user_agent));
     }
 }
