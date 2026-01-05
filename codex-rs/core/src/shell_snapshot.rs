@@ -379,14 +379,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn macos_zsh_snapshot_includes_sections() -> Result<()> {
-        let snapshot = get_snapshot(ShellType::Zsh).await?;
-        assert_posix_snapshot_sections(&snapshot);
-        Ok(())
-    }
-
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn linux_bash_snapshot_includes_sections() -> Result<()> {

@@ -125,10 +125,6 @@ pub struct Config {
     /// for either of approval_policy or sandbox_mode.
     pub did_user_set_custom_approval_policy_or_sandbox_mode: bool,
 
-    /// On Windows, indicates that a previously configured workspace-write sandbox
-    /// was coerced to read-only because native auto mode is unsupported.
-    pub forced_auto_mode_downgraded_on_windows: bool,
-
     pub shell_environment_policy: ShellEnvironmentPolicy,
 
     /// When `true`, `AgentReasoning` events emitted by the backend will be
@@ -241,22 +237,17 @@ pub struct Config {
     /// resolved against this path.
     pub cwd: PathBuf,
 
-    /// Preferred store for CLI auth credentials.
-    /// file (default): Use a file in the Codex home directory.
-    /// keyring: Use an OS-specific keyring service.
-    /// auto: Use the OS-specific keyring service if available, otherwise use a file.
+    /// Store for CLI auth credentials.
+    ///
+    /// This fork supports file storage only (`CODEX_HOME/auth.json`).
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
-    /// Preferred store for MCP OAuth credentials.
-    /// keyring: Use an OS-specific keyring service.
-    ///          Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.
-    ///          https://github.com/openai/codex/blob/main/codex-rs/rmcp-client/src/oauth.rs#L2
-    /// file: CODEX_HOME/.credentials.json
-    ///       This file will be readable to Codex and other applications running as the same user.
-    /// auto (default): keyring if available, otherwise file.
+    /// Store for MCP OAuth credentials.
+    ///
+    /// This fork supports file storage only (`CODEX_HOME/.credentials.json`).
     pub mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode,
 
     /// Combined provider map (defaults merged with user-defined overrides).
@@ -307,9 +298,6 @@ pub struct Config {
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
-
-    /// When set, restricts ChatGPT login to a specific workspace identifier.
-    pub forced_chatgpt_workspace_id: Option<String>,
 
     /// When set, restricts the login mechanism users may use.
     pub forced_login_method: Option<ForcedLoginMethod>,
@@ -708,18 +696,13 @@ pub struct ConfigToml {
     /// Compact prompt used for history compaction.
     pub compact_prompt: Option<String>,
 
-    /// When set, restricts ChatGPT login to a specific workspace identifier.
-    #[serde(default)]
-    pub forced_chatgpt_workspace_id: Option<String>,
-
     /// When set, restricts the login mechanism users may use.
     #[serde(default)]
     pub forced_login_method: Option<ForcedLoginMethod>,
 
-    /// Preferred backend for storing CLI auth credentials.
-    /// file (default): Use a file in the Codex home directory.
-    /// keyring: Use an OS-specific keyring service.
-    /// auto: Use the keyring if available, otherwise use a file.
+    /// Store for CLI auth credentials.
+    ///
+    /// This fork supports file storage only (`CODEX_HOME/auth.json`).
     #[serde(default)]
     pub cli_auth_credentials_store: Option<AuthCredentialsStoreMode>,
 
@@ -727,11 +710,9 @@ pub struct ConfigToml {
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
-    /// Preferred backend for storing MCP OAuth credentials.
-    /// keyring: Use an OS-specific keyring service.
-    ///          https://github.com/openai/codex/blob/main/codex-rs/rmcp-client/src/oauth.rs#L2
-    /// file: Use a file in the Codex home directory.
-    /// auto (default): Use the OS-specific keyring service if available, otherwise use a file.
+    /// Store for MCP OAuth credentials.
+    ///
+    /// This fork supports file storage only (`CODEX_HOME/.credentials.json`).
     #[serde(default)]
     pub mcp_oauth_credentials_store: Option<OAuthCredentialsStoreMode>,
 
@@ -844,7 +825,6 @@ impl From<ConfigToml> for UserSavedConfig {
             approval_policy: config_toml.approval_policy,
             sandbox_mode: config_toml.sandbox_mode,
             sandbox_settings: config_toml.sandbox_workspace_write.map(From::from),
-            forced_chatgpt_workspace_id: config_toml.forced_chatgpt_workspace_id,
             forced_login_method: config_toml.forced_login_method,
             model: config_toml.model,
             model_reasoning_effort: config_toml.model_reasoning_effort,
@@ -907,7 +887,6 @@ pub struct GhostSnapshotToml {
 #[derive(Debug, PartialEq, Eq)]
 pub struct SandboxPolicyResolution {
     pub policy: SandboxPolicy,
-    pub forced_auto_mode_downgraded_on_windows: bool,
 }
 
 impl ConfigToml {
@@ -932,7 +911,7 @@ impl ConfigToml {
                 })
             })
             .unwrap_or_default();
-        let mut sandbox_policy = match resolved_sandbox_mode {
+        let sandbox_policy = match resolved_sandbox_mode {
             SandboxMode::ReadOnly => SandboxPolicy::new_read_only_policy(),
             SandboxMode::WorkspaceWrite => match self.sandbox_workspace_write.as_ref() {
                 Some(SandboxWorkspaceWrite {
@@ -950,18 +929,8 @@ impl ConfigToml {
             },
             SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
         };
-        let mut forced_auto_mode_downgraded_on_windows = false;
-        if cfg!(target_os = "windows")
-            && matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite)
-            // If the experimental Windows sandbox is enabled, do not force a downgrade.
-            && crate::safety::get_platform_sandbox().is_none()
-        {
-            sandbox_policy = SandboxPolicy::new_read_only_policy();
-            forced_auto_mode_downgraded_on_windows = true;
-        }
         SandboxPolicyResolution {
             policy: sandbox_policy,
-            forced_auto_mode_downgraded_on_windows,
         }
     }
 
@@ -1122,15 +1091,6 @@ impl Config {
         };
 
         let features = Features::from_config(&cfg, &config_profile, feature_overrides);
-        #[cfg(target_os = "windows")]
-        {
-            // Base flag controls sandbox on/off; elevated only applies when base is enabled.
-            let sandbox_enabled = features.enabled(Feature::WindowsSandbox);
-            crate::safety::set_windows_sandbox_enabled(sandbox_enabled);
-            let elevated_enabled =
-                sandbox_enabled && features.enabled(Feature::WindowsSandboxElevated);
-            crate::safety::set_windows_elevated_sandbox_enabled(elevated_enabled);
-        }
 
         let resolved_cwd = {
             use std::env;
@@ -1160,7 +1120,6 @@ impl Config {
 
         let SandboxPolicyResolution {
             policy: mut sandbox_policy,
-            forced_auto_mode_downgraded_on_windows,
         } = cfg.derive_sandbox_policy(sandbox_mode, config_profile.sandbox_mode, &resolved_cwd);
         if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
             for path in additional_writable_roots {
@@ -1244,16 +1203,6 @@ impl Config {
         let tools_web_search_request = features.enabled(Feature::WebSearchRequest);
         let use_experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
 
-        let forced_chatgpt_workspace_id =
-            cfg.forced_chatgpt_workspace_id.as_ref().and_then(|value| {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            });
-
         let forced_login_method = cfg.forced_login_method;
 
         let model = model.or(config_profile.model).or(cfg.model);
@@ -1323,7 +1272,6 @@ impl Config {
             approval_policy: constrained_approval_policy,
             sandbox_policy: constrained_sandbox_policy,
             did_user_set_custom_approval_policy_or_sandbox_mode,
-            forced_auto_mode_downgraded_on_windows,
             shell_environment_policy,
             notify: cfg.notify,
             user_instructions,
@@ -1377,7 +1325,6 @@ impl Config {
                 .chatgpt_base_url
                 .or(cfg.chatgpt_base_url)
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
-            forced_chatgpt_workspace_id,
             forced_login_method,
             include_apply_patch_tool: include_apply_patch_tool_flag,
             tools_web_search_request,
@@ -1479,16 +1426,6 @@ impl Config {
         } else {
             Ok(Some(s))
         }
-    }
-
-    pub fn set_windows_sandbox_globally(&mut self, value: bool) {
-        crate::safety::set_windows_sandbox_enabled(value);
-        if value {
-            self.features.enable(Feature::WindowsSandbox);
-        } else {
-            self.features.disable(Feature::WindowsSandbox);
-        }
-        self.forced_auto_mode_downgraded_on_windows = !value;
     }
 }
 
@@ -1629,7 +1566,6 @@ network_access = false  # This should be ignored.
             resolution,
             SandboxPolicyResolution {
                 policy: SandboxPolicy::DangerFullAccess,
-                forced_auto_mode_downgraded_on_windows: false,
             }
         );
 
@@ -1652,7 +1588,6 @@ network_access = true  # This should be ignored.
             resolution,
             SandboxPolicyResolution {
                 policy: SandboxPolicy::ReadOnly,
-                forced_auto_mode_downgraded_on_windows: false,
             }
         );
 
@@ -1679,28 +1614,17 @@ exclude_slash_tmp = true
             None,
             &PathBuf::from("/tmp/test"),
         );
-        if cfg!(target_os = "windows") {
-            assert_eq!(
-                resolution,
-                SandboxPolicyResolution {
-                    policy: SandboxPolicy::ReadOnly,
-                    forced_auto_mode_downgraded_on_windows: true,
-                }
-            );
-        } else {
-            assert_eq!(
-                resolution,
-                SandboxPolicyResolution {
-                    policy: SandboxPolicy::WorkspaceWrite {
-                        writable_roots: vec![writable_root.clone()],
-                        network_access: false,
-                        exclude_tmpdir_env_var: true,
-                        exclude_slash_tmp: true,
-                    },
-                    forced_auto_mode_downgraded_on_windows: false,
-                }
-            );
-        }
+        assert_eq!(
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![writable_root.clone()],
+                    network_access: false,
+                    exclude_tmpdir_env_var: true,
+                    exclude_slash_tmp: true,
+                },
+            }
+        );
 
         let sandbox_workspace_write = format!(
             r#"
@@ -1727,28 +1651,17 @@ trust_level = "trusted"
             None,
             &PathBuf::from("/tmp/test"),
         );
-        if cfg!(target_os = "windows") {
-            assert_eq!(
-                resolution,
-                SandboxPolicyResolution {
-                    policy: SandboxPolicy::ReadOnly,
-                    forced_auto_mode_downgraded_on_windows: true,
-                }
-            );
-        } else {
-            assert_eq!(
-                resolution,
-                SandboxPolicyResolution {
-                    policy: SandboxPolicy::WorkspaceWrite {
-                        writable_roots: vec![writable_root],
-                        network_access: false,
-                        exclude_tmpdir_env_var: true,
-                        exclude_slash_tmp: true,
-                    },
-                    forced_auto_mode_downgraded_on_windows: false,
-                }
-            );
-        }
+        assert_eq!(
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![writable_root],
+                    network_access: false,
+                    exclude_tmpdir_env_var: true,
+                    exclude_slash_tmp: true,
+                },
+            }
+        );
     }
 
     #[test]
@@ -1773,30 +1686,19 @@ trust_level = "trusted"
         )?;
 
         let expected_backend = AbsolutePathBuf::try_from(backend).unwrap();
-        if cfg!(target_os = "windows") {
-            assert!(
-                config.forced_auto_mode_downgraded_on_windows,
-                "expected workspace-write request to be downgraded on Windows"
-            );
-            match config.sandbox_policy.get() {
-                &SandboxPolicy::ReadOnly => {}
-                other => panic!("expected read-only policy on Windows, got {other:?}"),
+        match config.sandbox_policy.get() {
+            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
+                assert_eq!(
+                    writable_roots
+                        .iter()
+                        .filter(|root| **root == expected_backend)
+                        .count(),
+                    1,
+                    "expected single writable root entry for {}",
+                    expected_backend.display()
+                );
             }
-        } else {
-            match config.sandbox_policy.get() {
-                SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
-                    assert_eq!(
-                        writable_roots
-                            .iter()
-                            .filter(|root| **root == expected_backend)
-                            .count(),
-                        1,
-                        "expected single writable root entry for {}",
-                        expected_backend.display()
-                    );
-                }
-                other => panic!("expected workspace-write policy, got {other:?}"),
-            }
+            other => panic!("expected workspace-write policy, got {other:?}"),
         }
 
         Ok(())
@@ -1822,10 +1724,10 @@ trust_level = "trusted"
     }
 
     #[test]
-    fn config_honors_explicit_keyring_auth_store_mode() -> std::io::Result<()> {
+    fn config_honors_explicit_file_cli_auth_store_mode() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let cfg = ConfigToml {
-            cli_auth_credentials_store: Some(AuthCredentialsStoreMode::Keyring),
+            cli_auth_credentials_store: Some(AuthCredentialsStoreMode::File),
             ..Default::default()
         };
 
@@ -1837,14 +1739,14 @@ trust_level = "trusted"
 
         assert_eq!(
             config.cli_auth_credentials_store_mode,
-            AuthCredentialsStoreMode::Keyring,
+            AuthCredentialsStoreMode::File,
         );
 
         Ok(())
     }
 
     #[test]
-    fn config_defaults_to_auto_oauth_store_mode() -> std::io::Result<()> {
+    fn config_defaults_to_file_oauth_store_mode() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let cfg = ConfigToml::default();
 
@@ -1856,7 +1758,7 @@ trust_level = "trusted"
 
         assert_eq!(
             config.mcp_oauth_credentials_store_mode,
-            OAuthCredentialsStoreMode::Auto,
+            OAuthCredentialsStoreMode::File,
         );
 
         Ok(())
@@ -1951,19 +1853,10 @@ trust_level = "trusted"
             codex_home.path().to_path_buf(),
         )?;
 
-        if cfg!(target_os = "windows") {
-            assert!(matches!(
-                config.sandbox_policy.get(),
-                SandboxPolicy::ReadOnly
-            ));
-            assert!(config.forced_auto_mode_downgraded_on_windows);
-        } else {
-            assert!(matches!(
-                config.sandbox_policy.get(),
-                SandboxPolicy::WorkspaceWrite { .. }
-            ));
-            assert!(!config.forced_auto_mode_downgraded_on_windows);
-        }
+        assert!(matches!(
+            config.sandbox_policy.get(),
+            SandboxPolicy::WorkspaceWrite { .. }
+        ));
 
         Ok(())
     }
@@ -2043,13 +1936,11 @@ trust_level = "trusted"
         let managed_path = codex_home.path().join("managed_config.toml");
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
 
-        std::fs::write(&config_path, "mcp_oauth_credentials_store = \"file\"\n")?;
-        std::fs::write(&managed_path, "mcp_oauth_credentials_store = \"keyring\"\n")?;
+        std::fs::write(&config_path, "")?;
+        std::fs::write(&managed_path, "mcp_oauth_credentials_store = \"file\"\n")?;
 
         let overrides = LoaderOverrides {
             managed_config_path: Some(managed_path.clone()),
-            #[cfg(target_os = "macos")]
-            managed_preferences_base64: None,
         };
 
         let cwd = AbsolutePathBuf::try_from(codex_home.path())?;
@@ -2065,7 +1956,7 @@ trust_level = "trusted"
         })?;
         assert_eq!(
             cfg.mcp_oauth_credentials_store,
-            Some(OAuthCredentialsStoreMode::Keyring),
+            Some(OAuthCredentialsStoreMode::File),
         );
 
         let final_config = Config::load_from_base_config_with_overrides(
@@ -2075,7 +1966,7 @@ trust_level = "trusted"
         )?;
         assert_eq!(
             final_config.mcp_oauth_credentials_store_mode,
-            OAuthCredentialsStoreMode::Keyring,
+            OAuthCredentialsStoreMode::File,
         );
 
         Ok(())
@@ -2168,8 +2059,6 @@ trust_level = "trusted"
 
         let overrides = LoaderOverrides {
             managed_config_path: Some(managed_path),
-            #[cfg(target_os = "macos")]
-            managed_preferences_base64: None,
         };
 
         let cwd = AbsolutePathBuf::try_from(codex_home.path())?;
@@ -2958,7 +2847,6 @@ model = "gpt-5.1-codex"
         cfg: ConfigToml,
         model_provider_map: HashMap<String, ModelProviderInfo>,
         openai_provider: ModelProviderInfo,
-        openai_chat_completions_provider: ModelProviderInfo,
     }
 
     impl PrecedenceTestFixture {
@@ -3037,15 +2925,6 @@ approval_policy = "untrusted"
 # `ConfigOverrides`.
 profile = "gpt3"
 
-[model_providers.openai-chat-completions]
-name = "OpenAI using Chat Completions"
-base_url = "https://api.openai.com/v1"
-env_key = "OPENAI_API_KEY"
-wire_api = "chat"
-request_max_retries = 4            # retry failed HTTP requests
-stream_max_retries = 10            # retry dropped SSE streams
-stream_idle_timeout_ms = 300000    # 5m idle timeout
-
 [profiles.o3]
 model = "o3"
 model_provider = "openai"
@@ -3055,7 +2934,7 @@ model_reasoning_summary = "detailed"
 
 [profiles.gpt3]
 model = "gpt-3.5-turbo"
-model_provider = "openai-chat-completions"
+model_provider = "openai"
 
 [profiles.zdr]
 model = "o3"
@@ -3083,29 +2962,7 @@ model_verbosity = "high"
 
         let codex_home_temp_dir = TempDir::new().unwrap();
 
-        let openai_chat_completions_provider = ModelProviderInfo {
-            name: "OpenAI using Chat Completions".to_string(),
-            base_url: Some("https://api.openai.com/v1".to_string()),
-            env_key: Some("OPENAI_API_KEY".to_string()),
-            wire_api: crate::WireApi::Chat,
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(4),
-            stream_max_retries: Some(10),
-            stream_idle_timeout_ms: Some(300_000),
-            requires_openai_auth: false,
-        };
-        let model_provider_map = {
-            let mut model_provider_map = built_in_model_providers();
-            model_provider_map.insert(
-                "openai-chat-completions".to_string(),
-                openai_chat_completions_provider.clone(),
-            );
-            model_provider_map
-        };
+        let model_provider_map = built_in_model_providers();
 
         let openai_provider = model_provider_map
             .get("openai")
@@ -3118,7 +2975,6 @@ model_verbosity = "high"
             cfg,
             model_provider_map,
             openai_provider,
-            openai_chat_completions_provider,
         })
     }
 
@@ -3159,7 +3015,6 @@ model_verbosity = "high"
                 approval_policy: Constrained::allow_any(AskForApproval::Never),
                 sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
-                forced_auto_mode_downgraded_on_windows: false,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 user_instructions: None,
                 notify: None,
@@ -3186,7 +3041,6 @@ model_verbosity = "high"
                 base_instructions: None,
                 developer_instructions: None,
                 compact_prompt: None,
-                forced_chatgpt_workspace_id: None,
                 forced_login_method: None,
                 include_apply_patch_tool: false,
                 tools_web_search_request: false,
@@ -3237,12 +3091,11 @@ model_verbosity = "high"
             review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
             model_context_window: None,
             model_auto_compact_token_limit: None,
-            model_provider_id: "openai-chat-completions".to_string(),
-            model_provider: fixture.openai_chat_completions_provider.clone(),
+            model_provider_id: "openai".to_string(),
+            model_provider: fixture.openai_provider.clone(),
             approval_policy: Constrained::allow_any(AskForApproval::UnlessTrusted),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
-            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
@@ -3269,7 +3122,6 @@ model_verbosity = "high"
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
-            forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
@@ -3340,7 +3192,6 @@ model_verbosity = "high"
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
-            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
@@ -3367,7 +3218,6 @@ model_verbosity = "high"
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
-            forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
@@ -3424,7 +3274,6 @@ model_verbosity = "high"
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
-            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
@@ -3451,7 +3300,6 @@ model_verbosity = "high"
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
-            forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
             tools_web_search_request: false,

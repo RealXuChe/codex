@@ -254,15 +254,9 @@ fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Shell {
             .and_then(|shell| detect_shell_type(&shell))
             .and_then(|shell_type| get_shell(shell_type, None));
 
-        let shell_with_fallback = if cfg!(target_os = "macos") {
-            user_default_shell
-                .or_else(|| get_shell(ShellType::Zsh, None))
-                .or_else(|| get_shell(ShellType::Bash, None))
-        } else {
-            user_default_shell
-                .or_else(|| get_shell(ShellType::Bash, None))
-                .or_else(|| get_shell(ShellType::Zsh, None))
-        };
+        let shell_with_fallback = user_default_shell
+            .or_else(|| get_shell(ShellType::Bash, None))
+            .or_else(|| get_shell(ShellType::Zsh, None));
 
         shell_with_fallback.unwrap_or(ultimate_fallback_shell())
     }
@@ -342,26 +336,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::process::Command;
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn detects_zsh() {
-        let zsh_shell = get_shell(ShellType::Zsh, None).unwrap();
-
-        let shell_path = zsh_shell.shell_path;
-
-        assert_eq!(shell_path, PathBuf::from("/bin/zsh"));
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn fish_fallback_to_zsh() {
-        let zsh_shell = default_user_shell_from_path(Some(PathBuf::from("/bin/fish")));
-
-        let shell_path = zsh_shell.shell_path;
-
-        assert_eq!(shell_path, PathBuf::from("/bin/zsh"));
-    }
 
     #[test]
     fn detects_bash() {

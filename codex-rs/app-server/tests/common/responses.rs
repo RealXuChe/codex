@@ -1,98 +1,78 @@
 use serde_json::json;
 use std::path::Path;
 
+fn sse(events: Vec<serde_json::Value>) -> anyhow::Result<String> {
+    let mut out = String::new();
+    for event in events {
+        out.push_str(&format!("data: {}\n\n", serde_json::to_string(&event)?));
+    }
+    Ok(out)
+}
+
 pub fn create_shell_command_sse_response(
     command: Vec<String>,
     workdir: Option<&Path>,
     timeout_ms: Option<u64>,
     call_id: &str,
 ) -> anyhow::Result<String> {
-    // The `arguments` for the `shell_command` tool is a serialized JSON object.
     let command_str = shlex::try_join(command.iter().map(String::as_str))?;
     let tool_call_arguments = serde_json::to_string(&json!({
         "command": command_str,
         "workdir": workdir.map(|w| w.to_string_lossy()),
         "timeout_ms": timeout_ms
     }))?;
-    let tool_call = json!({
-        "choices": [
-            {
-                "delta": {
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "function": {
-                                "name": "shell_command",
-                                "arguments": tool_call_arguments
-                            }
-                        }
-                    ]
-                },
-                "finish_reason": "tool_calls"
-            }
-        ]
-    });
 
-    let sse = format!(
-        "data: {}\n\ndata: DONE\n\n",
-        serde_json::to_string(&tool_call)?
-    );
-    Ok(sse)
+    sse(vec![
+        json!({"type":"response.created","response":{}}),
+        json!({
+            "type":"response.output_item.done",
+            "item": {
+                "type":"function_call",
+                "call_id": call_id,
+                "name":"shell_command",
+                "arguments": tool_call_arguments
+            }
+        }),
+        json!({"type":"response.completed","response":{"id": format!("resp-{call_id}")}}),
+    ])
 }
 
 pub fn create_final_assistant_message_sse_response(message: &str) -> anyhow::Result<String> {
-    let assistant_message = json!({
-        "choices": [
-            {
-                "delta": {
-                    "content": message
-                },
-                "finish_reason": "stop"
+    sse(vec![
+        json!({"type":"response.created","response":{}}),
+        json!({
+            "type":"response.output_item.done",
+            "item": {
+                "type":"message",
+                "role":"assistant",
+                "content":[{"type":"output_text","text": message}]
             }
-        ]
-    });
-
-    let sse = format!(
-        "data: {}\n\ndata: DONE\n\n",
-        serde_json::to_string(&assistant_message)?
-    );
-    Ok(sse)
+        }),
+        json!({"type":"response.completed","response":{"id":"resp-final"}}),
+    ])
 }
 
 pub fn create_apply_patch_sse_response(
     patch_content: &str,
     call_id: &str,
 ) -> anyhow::Result<String> {
-    // Use shell_command to call apply_patch with heredoc format
     let command = format!("apply_patch <<'EOF'\n{patch_content}\nEOF");
     let tool_call_arguments = serde_json::to_string(&json!({
         "command": command
     }))?;
-
-    let tool_call = json!({
-        "choices": [
-            {
-                "delta": {
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "function": {
-                                "name": "shell_command",
-                                "arguments": tool_call_arguments
-                            }
-                        }
-                    ]
-                },
-                "finish_reason": "tool_calls"
+    sse(vec![
+        json!({"type":"response.created","response":{}}),
+        json!({
+            "type":"response.output_item.done",
+            "item": {
+                "type":"function_call",
+                "call_id": call_id,
+                "name":"shell_command",
+                "arguments": tool_call_arguments
             }
-        ]
-    });
-
-    let sse = format!(
-        "data: {}\n\ndata: DONE\n\n",
-        serde_json::to_string(&tool_call)?
-    );
-    Ok(sse)
+        }),
+        json!({"type":"response.completed","response":{"id": format!("resp-{call_id}")}}),
+    ])
 }
 
 pub fn create_exec_command_sse_response(call_id: &str) -> anyhow::Result<String> {
@@ -108,28 +88,17 @@ pub fn create_exec_command_sse_response(call_id: &str) -> anyhow::Result<String>
         "cmd": command.join(" "),
         "yield_time_ms": 500
     }))?;
-    let tool_call = json!({
-        "choices": [
-            {
-                "delta": {
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "function": {
-                                "name": "exec_command",
-                                "arguments": tool_call_arguments
-                            }
-                        }
-                    ]
-                },
-                "finish_reason": "tool_calls"
+    sse(vec![
+        json!({"type":"response.created","response":{}}),
+        json!({
+            "type":"response.output_item.done",
+            "item": {
+                "type":"function_call",
+                "call_id": call_id,
+                "name":"exec_command",
+                "arguments": tool_call_arguments
             }
-        ]
-    });
-
-    let sse = format!(
-        "data: {}\n\ndata: DONE\n\n",
-        serde_json::to_string(&tool_call)?
-    );
-    Ok(sse)
+        }),
+        json!({"type":"response.completed","response":{"id": format!("resp-{call_id}")}}),
+    ])
 }

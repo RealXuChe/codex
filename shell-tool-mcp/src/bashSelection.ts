@@ -1,6 +1,5 @@
 import path from "node:path";
-import os from "node:os";
-import { DARWIN_BASH_VARIANTS, LINUX_BASH_VARIANTS } from "./constants";
+import { LINUX_BASH_VARIANTS } from "./constants";
 import { BashSelection, OsReleaseInfo } from "./types";
 
 function supportedDetail(variants: ReadonlyArray<{ name: string }>): string {
@@ -65,39 +64,9 @@ export function selectLinuxBash(
   );
 }
 
-export function selectDarwinBash(
-  bashRoot: string,
-  darwinRelease: string,
-): BashSelection {
-  const darwinMajor = Number.parseInt(darwinRelease.split(".")[0] || "0", 10);
-  const preferred = DARWIN_BASH_VARIANTS.find(
-    (variant) => darwinMajor >= variant.minDarwin,
-  );
-  if (preferred) {
-    return {
-      path: path.join(bashRoot, preferred.name, "bash"),
-      variant: preferred.name,
-    };
-  }
-
-  const fallback = DARWIN_BASH_VARIANTS[0];
-  if (fallback) {
-    return {
-      path: path.join(bashRoot, fallback.name, "bash"),
-      variant: fallback.name,
-    };
-  }
-
-  const detail = supportedDetail(DARWIN_BASH_VARIANTS);
-  throw new Error(
-    `Unable to select a macOS Bash build (darwin ${darwinMajor}). ${detail}`,
-  );
-}
-
 export function resolveBashPath(
   targetRoot: string,
   platform: NodeJS.Platform,
-  darwinRelease = os.release(),
   osInfo: OsReleaseInfo | null = null,
 ): BashSelection {
   const bashRoot = path.join(targetRoot, "bash");
@@ -107,9 +76,6 @@ export function resolveBashPath(
       throw new Error("Linux OS info is required to select a Bash variant.");
     }
     return selectLinuxBash(bashRoot, osInfo);
-  }
-  if (platform === "darwin") {
-    return selectDarwinBash(bashRoot, darwinRelease);
   }
   throw new Error(`Unsupported platform for Bash selection: ${platform}`);
 }

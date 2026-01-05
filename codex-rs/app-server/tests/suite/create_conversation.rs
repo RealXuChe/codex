@@ -1,7 +1,7 @@
 use anyhow::Result;
 use app_test_support::McpProcess;
 use app_test_support::create_final_assistant_message_sse_response;
-use app_test_support::create_mock_chat_completions_server;
+use app_test_support::create_mock_responses_server;
 use app_test_support::to_response;
 use codex_app_server_protocol::AddConversationListenerParams;
 use codex_app_server_protocol::AddConversationSubscriptionResponse;
@@ -24,7 +24,7 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 async fn test_conversation_create_and_send_message_ok() -> Result<()> {
     // Mock server – we won't strictly rely on it, but provide one to satisfy any model wiring.
     let responses = vec![create_final_assistant_message_sse_response("Done")?];
-    let server = create_mock_chat_completions_server(responses).await;
+    let server = create_mock_responses_server(responses).await;
 
     // Temporary Codex home with config pointing at the mock server.
     let codex_home = TempDir::new()?;
@@ -86,7 +86,7 @@ async fn test_conversation_create_and_send_message_ok() -> Result<()> {
     .await??;
     let _ok: SendUserMessageResponse = to_response::<SendUserMessageResponse>(send_resp)?;
 
-    // avoid race condition by waiting for the mock server to receive the chat.completions request
+    // Avoid a race condition by waiting for the mock server to receive the responses request.
     let deadline = std::time::Instant::now() + DEFAULT_READ_TIMEOUT;
     let requests = loop {
         let requests = server.received_requests().await.unwrap_or_default();
@@ -94,24 +94,34 @@ async fn test_conversation_create_and_send_message_ok() -> Result<()> {
             break requests;
         }
         if std::time::Instant::now() >= deadline {
-            panic!("mock server did not receive the chat.completions request in time");
+            panic!("mock server did not receive the responses request in time");
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     };
 
-    // Verify the outbound request body matches expectations for Chat Completions.
+    // Verify the outbound request body matches expectations for Responses.
     let request = requests
         .first()
         .expect("mock server should have received at least one request");
     let body = request.body_json::<serde_json::Value>()?;
     assert_eq!(body["model"], json!("o3"));
     assert!(body["stream"].as_bool().unwrap_or(false));
-    let messages = body["messages"]
+    let input = body["input"].as_array().expect("input should be array");
+    let last_message = input
+        .iter()
+        .rev()
+        .find(|item| item.get("type") == Some(&json!("message")))
+        .expect("at least one message input item");
+    assert_eq!(last_message["role"], json!("user"));
+    let spans = last_message["content"]
         .as_array()
-        .expect("messages should be array");
-    let last = messages.last().expect("at least one message");
-    assert_eq!(last["role"], json!("user"));
-    assert_eq!(last["content"], json!("Hello"));
+        .expect("message content should be array");
+    let last_text = spans
+        .iter()
+        .rev()
+        .find(|span| span.get("type") == Some(&json!("input_text")))
+        .expect("message content should include an input_text span");
+    assert_eq!(last_text["text"], json!("Hello"));
 
     drop(server);
     Ok(())
@@ -133,7 +143,7 @@ model_provider = "mock_provider"
 [model_providers.mock_provider]
 name = "Mock provider for test"
 base_url = "{server_uri}/v1"
-wire_api = "chat"
+wire_api = "responses"
 request_max_retries = 0
 stream_max_retries = 0
 "#

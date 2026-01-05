@@ -1,95 +1,14 @@
-use crate::ChatRequest;
-use crate::auth::AuthProvider;
-use crate::common::Prompt as ApiPrompt;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
-use crate::endpoint::streaming::StreamingClient;
 use crate::error::ApiError;
-use crate::provider::Provider;
-use crate::provider::WireApi;
-use crate::sse::chat::spawn_chat_stream;
-use crate::telemetry::SseTelemetry;
-use codex_client::HttpTransport;
-use codex_client::RequestTelemetry;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::SessionSource;
 use futures::Stream;
-use http::HeaderMap;
-use serde_json::Value;
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
-
-pub struct ChatClient<T: HttpTransport, A: AuthProvider> {
-    streaming: StreamingClient<T, A>,
-}
-
-impl<T: HttpTransport, A: AuthProvider> ChatClient<T, A> {
-    pub fn new(transport: T, provider: Provider, auth: A) -> Self {
-        Self {
-            streaming: StreamingClient::new(transport, provider, auth),
-        }
-    }
-
-    pub fn with_telemetry(
-        self,
-        request: Option<Arc<dyn RequestTelemetry>>,
-        sse: Option<Arc<dyn SseTelemetry>>,
-    ) -> Self {
-        Self {
-            streaming: self.streaming.with_telemetry(request, sse),
-        }
-    }
-
-    pub async fn stream_request(&self, request: ChatRequest) -> Result<ResponseStream, ApiError> {
-        self.stream(request.body, request.headers).await
-    }
-
-    pub async fn stream_prompt(
-        &self,
-        model: &str,
-        prompt: &ApiPrompt,
-        conversation_id: Option<String>,
-        session_source: Option<SessionSource>,
-    ) -> Result<ResponseStream, ApiError> {
-        use crate::requests::ChatRequestBuilder;
-
-        let request =
-            ChatRequestBuilder::new(model, &prompt.instructions, &prompt.input, &prompt.tools)
-                .conversation_id(conversation_id)
-                .session_source(session_source)
-                .build(self.streaming.provider())?;
-
-        self.stream_request(request).await
-    }
-
-    fn path(&self) -> &'static str {
-        match self.streaming.provider().wire {
-            WireApi::Chat => "chat/completions",
-            _ => "responses",
-        }
-    }
-
-    pub async fn stream(
-        &self,
-        body: Value,
-        extra_headers: HeaderMap,
-    ) -> Result<ResponseStream, ApiError> {
-        self.streaming
-            .stream(self.path(), body, extra_headers, spawn_chat_stream)
-            .await
-    }
-}
-
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub enum AggregateMode {
-    AggregatedOnly,
-    Streaming,
-}
 
 /// Stream adapter that merges token deltas into a single assistant message per turn.
 pub struct AggregatedStream {
@@ -97,7 +16,6 @@ pub struct AggregatedStream {
     cumulative: String,
     cumulative_reasoning: String,
     pending: VecDeque<ResponseEvent>,
-    mode: AggregateMode,
 }
 
 impl Stream for AggregatedStream {
@@ -118,42 +36,22 @@ impl Stream for AggregatedStream {
                 Poll::Ready(Some(Ok(ResponseEvent::OutputItemDone(item)))) => {
                     let is_assistant_message = matches!(
                         &item,
-                        ResponseItem::Message { role, .. } if role == "assistant"
+                        ResponseItem::Message {
+                            role,
+                            content: _,
+                            ..
+                        } if role == "assistant"
                     );
 
                     if is_assistant_message {
-                        match this.mode {
-                            AggregateMode::AggregatedOnly => {
-                                if this.cumulative.is_empty()
-                                    && let ResponseItem::Message { content, .. } = &item
-                                    && let Some(text) = content.iter().find_map(|c| match c {
-                                        ContentItem::OutputText { text } => Some(text),
-                                        _ => None,
-                                    })
-                                {
-                                    this.cumulative.push_str(text);
-                                }
-                                continue;
-                            }
-                            AggregateMode::Streaming => {
-                                if this.cumulative.is_empty() {
-                                    return Poll::Ready(Some(Ok(ResponseEvent::OutputItemDone(
-                                        item,
-                                    ))));
-                                } else {
-                                    continue;
-                                }
-                            }
+                        this.pending
+                            .push_back(ResponseEvent::OutputItemDone(item.clone()));
+                        if let Some(ev) = this.pending.pop_front() {
+                            return Poll::Ready(Some(Ok(ev)));
                         }
+                    } else {
+                        return Poll::Ready(Some(Ok(ResponseEvent::OutputItemDone(item))));
                     }
-
-                    return Poll::Ready(Some(Ok(ResponseEvent::OutputItemDone(item))));
-                }
-                Poll::Ready(Some(Ok(ResponseEvent::RateLimits(snapshot)))) => {
-                    return Poll::Ready(Some(Ok(ResponseEvent::RateLimits(snapshot))));
-                }
-                Poll::Ready(Some(Ok(ResponseEvent::ModelsEtag(etag)))) => {
-                    return Poll::Ready(Some(Ok(ResponseEvent::ModelsEtag(etag))));
                 }
                 Poll::Ready(Some(Ok(ResponseEvent::Completed {
                     response_id,
@@ -208,25 +106,14 @@ impl Stream for AggregatedStream {
                 }
                 Poll::Ready(Some(Ok(ResponseEvent::OutputTextDelta(delta)))) => {
                     this.cumulative.push_str(&delta);
-                    if matches!(this.mode, AggregateMode::Streaming) {
-                        return Poll::Ready(Some(Ok(ResponseEvent::OutputTextDelta(delta))));
-                    } else {
-                        continue;
-                    }
+                    continue;
                 }
                 Poll::Ready(Some(Ok(ResponseEvent::ReasoningContentDelta {
                     delta,
-                    content_index,
+                    content_index: _,
                 }))) => {
                     this.cumulative_reasoning.push_str(&delta);
-                    if matches!(this.mode, AggregateMode::Streaming) {
-                        return Poll::Ready(Some(Ok(ResponseEvent::ReasoningContentDelta {
-                            delta,
-                            content_index,
-                        })));
-                    } else {
-                        continue;
-                    }
+                    continue;
                 }
                 Poll::Ready(Some(Ok(ResponseEvent::ReasoningSummaryDelta { .. }))) => continue,
                 Poll::Ready(Some(Ok(ResponseEvent::ReasoningSummaryPartAdded { .. }))) => {
@@ -234,6 +121,12 @@ impl Stream for AggregatedStream {
                 }
                 Poll::Ready(Some(Ok(ResponseEvent::OutputItemAdded(item)))) => {
                     return Poll::Ready(Some(Ok(ResponseEvent::OutputItemAdded(item))));
+                }
+                Poll::Ready(Some(Ok(ResponseEvent::RateLimits(snapshot)))) => {
+                    return Poll::Ready(Some(Ok(ResponseEvent::RateLimits(snapshot))));
+                }
+                Poll::Ready(Some(Ok(ResponseEvent::ModelsEtag(etag)))) => {
+                    return Poll::Ready(Some(Ok(ResponseEvent::ModelsEtag(etag))));
                 }
             }
         }
@@ -248,7 +141,7 @@ pub trait AggregateStreamExt {
 
 impl AggregateStreamExt for ResponseStream {
     fn aggregate(self) -> AggregatedStream {
-        AggregatedStream::new(self, AggregateMode::AggregatedOnly)
+        AggregatedStream::new(self)
     }
 
     fn streaming_mode(self) -> ResponseStream {
@@ -257,13 +150,12 @@ impl AggregateStreamExt for ResponseStream {
 }
 
 impl AggregatedStream {
-    fn new(inner: ResponseStream, mode: AggregateMode) -> Self {
-        AggregatedStream {
+    fn new(inner: ResponseStream) -> Self {
+        Self {
             inner,
             cumulative: String::new(),
             cumulative_reasoning: String::new(),
             pending: VecDeque::new(),
-            mode,
         }
     }
 }

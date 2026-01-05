@@ -110,14 +110,8 @@ impl ExecExpiration {
 pub enum SandboxType {
     None,
 
-    /// Only available on macOS.
-    MacosSeatbelt,
-
     /// Only available on Linux.
     LinuxSeccomp,
-
-    /// Only available on Windows.
-    WindowsRestrictedToken,
 }
 
 #[derive(Clone)]
@@ -216,105 +210,6 @@ pub(crate) async fn execute_exec_env(
     finalize_exec_result(raw_output_result, sandbox, duration)
 }
 
-#[cfg(target_os = "windows")]
-async fn exec_windows_sandbox(
-    params: ExecParams,
-    sandbox_policy: &SandboxPolicy,
-) -> Result<RawExecToolCallOutput> {
-    use crate::config::find_codex_home;
-    use crate::safety::is_windows_elevated_sandbox_enabled;
-    use codex_windows_sandbox::run_windows_sandbox_capture;
-    use codex_windows_sandbox::run_windows_sandbox_capture_elevated;
-
-    let ExecParams {
-        command,
-        cwd,
-        env,
-        expiration,
-        ..
-    } = params;
-    // TODO(iceweasel-oai): run_windows_sandbox_capture should support all
-    // variants of ExecExpiration, not just timeout.
-    let timeout_ms = expiration.timeout_ms();
-
-    let policy_str = serde_json::to_string(sandbox_policy).map_err(|err| {
-        CodexErr::Io(io::Error::other(format!(
-            "failed to serialize Windows sandbox policy: {err}"
-        )))
-    })?;
-    let sandbox_cwd = cwd.clone();
-    let codex_home = find_codex_home().map_err(|err| {
-        CodexErr::Io(io::Error::other(format!(
-            "windows sandbox: failed to resolve codex_home: {err}"
-        )))
-    })?;
-    let use_elevated = is_windows_elevated_sandbox_enabled();
-    let spawn_res = tokio::task::spawn_blocking(move || {
-        if use_elevated {
-            run_windows_sandbox_capture_elevated(
-                policy_str.as_str(),
-                &sandbox_cwd,
-                codex_home.as_ref(),
-                command,
-                &cwd,
-                env,
-                timeout_ms,
-            )
-        } else {
-            run_windows_sandbox_capture(
-                policy_str.as_str(),
-                &sandbox_cwd,
-                codex_home.as_ref(),
-                command,
-                &cwd,
-                env,
-                timeout_ms,
-            )
-        }
-    })
-    .await;
-
-    let capture = match spawn_res {
-        Ok(Ok(v)) => v,
-        Ok(Err(err)) => {
-            return Err(CodexErr::Io(io::Error::other(format!(
-                "windows sandbox: {err}"
-            ))));
-        }
-        Err(join_err) => {
-            return Err(CodexErr::Io(io::Error::other(format!(
-                "windows sandbox join error: {join_err}"
-            ))));
-        }
-    };
-
-    let exit_status = synthetic_exit_status(capture.exit_code);
-    let stdout = StreamOutput {
-        text: capture.stdout,
-        truncated_after_lines: None,
-    };
-    let stderr = StreamOutput {
-        text: capture.stderr,
-        truncated_after_lines: None,
-    };
-    // Best-effort aggregate: stdout then stderr
-    let mut aggregated = Vec::with_capacity(stdout.text.len() + stderr.text.len());
-    append_all(&mut aggregated, &stdout.text);
-    append_all(&mut aggregated, &stderr.text);
-    let aggregated_output = StreamOutput {
-        text: aggregated,
-        truncated_after_lines: None,
-    };
-
-    Ok(RawExecToolCallOutput {
-        exit_status,
-        stdout,
-        stderr,
-        aggregated_output,
-        timed_out: capture.timed_out,
-    })
-}
-
 fn finalize_exec_result(
     raw_output_result: std::result::Result<RawExecToolCallOutput, CodexErr>,
     sandbox_type: SandboxType,
@@ -384,10 +279,6 @@ pub(crate) mod errors {
                 SandboxTransformError::MissingLinuxSandboxExecutable => {
                     CodexErr::LandlockSandboxExecutableNotProvided
                 }
-                #[cfg(not(target_os = "macos"))]
-                SandboxTransformError::SeatbeltUnavailable => CodexErr::UnsupportedOperation(
-                    "seatbelt sandbox is only available on macOS".to_string(),
-                ),
             }
         }
     }
@@ -516,22 +407,12 @@ impl Default for ExecToolCallOutput {
     }
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 async fn exec(
     params: ExecParams,
-    sandbox: SandboxType,
+    _sandbox: SandboxType,
     sandbox_policy: &SandboxPolicy,
     stdout_stream: Option<StdoutStream>,
 ) -> Result<RawExecToolCallOutput> {
-    #[cfg(target_os = "windows")]
-    if sandbox == SandboxType::WindowsRestrictedToken
-        && !matches!(
-            sandbox_policy,
-            SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. }
-        )
-    {
-        return exec_windows_sandbox(params, sandbox_policy).await;
-    }
     let ExecParams {
         command,
         cwd,
@@ -841,10 +722,7 @@ mod tests {
             "",
             "cargo failed: Read-only file system when writing target",
         );
-        assert!(is_likely_sandbox_denied(
-            SandboxType::MacosSeatbelt,
-            &output
-        ));
+        assert!(is_likely_sandbox_denied(SandboxType::LinuxSeccomp, &output));
     }
 
     #[cfg(unix)]

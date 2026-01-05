@@ -59,8 +59,7 @@ let layers_for_ui = layers.layers_high_to_low();
 Implementation is split by concern:
 
 - `state.rs`: public types (`ConfigLayerEntry`, `ConfigLayerStack`) + merge/origins convenience methods.
-- `layer_io.rs`: reading `config.toml`, managed config, and managed preferences inputs.
+- `layer_io.rs`: reading `config.toml` and managed config inputs.
 - `overrides.rs`: CLI dotted-path overrides → TOML “session flags” layer.
 - `merge.rs`: recursive TOML merge.
 - `fingerprint.rs`: stable per-layer hashing and per-key origins traversal.
-- `macos.rs`: managed preferences integration (macOS only).

@@ -8,7 +8,6 @@ use std::time::Instant;
 
 use crate::pkce::PkceCodes;
 use crate::server::ServerOptions;
-use std::io;
 
 const ANSI_BLUE: &str = "\x1b[94m";
 const ANSI_GRAY: &str = "\x1b[90m";
@@ -182,13 +181,6 @@ pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {
     )
     .await
     .map_err(|err| std::io::Error::other(format!("device code exchange failed: {err}")))?;
-
-    if let Err(message) = crate::server::ensure_workspace_allowed(
-        opts.forced_chatgpt_workspace_id.as_deref(),
-        &tokens.id_token,
-    ) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
-    }
 
     crate::server::persist_tokens_async(
         &opts.codex_home,

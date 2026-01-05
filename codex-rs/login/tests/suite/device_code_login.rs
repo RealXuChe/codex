@@ -105,7 +105,6 @@ fn server_opts(
     let mut opts = ServerOptions::new(
         codex_home.path().to_path_buf(),
         "client-id".to_string(),
-        None,
         cli_auth_credentials_store_mode,
     );
     opts.issuer = issuer;
@@ -148,44 +147,6 @@ async fn device_code_login_integration_succeeds() -> anyhow::Result<()> {
     assert_eq!(tokens.refresh_token, "refresh-token-123");
     assert_eq!(tokens.id_token.raw_jwt, jwt);
     assert_eq!(tokens.account_id.as_deref(), Some("acct_321"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn device_code_login_rejects_workspace_mismatch() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let codex_home = tempdir().unwrap();
-    let mock_server = MockServer::start().await;
-
-    mock_usercode_success(&mock_server).await;
-
-    mock_poll_token_two_step(&mock_server, Arc::new(AtomicUsize::new(0)), 404).await;
-
-    let jwt = make_jwt(json!({
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": "acct_321",
-            "organization_id": "org-actual"
-        }
-    }));
-
-    mock_oauth_token_single(&mock_server, jwt).await;
-
-    let issuer = mock_server.uri();
-    let mut opts = server_opts(&codex_home, issuer, AuthCredentialsStoreMode::File);
-    opts.forced_chatgpt_workspace_id = Some("org-required".to_string());
-
-    let err = run_device_code_login(opts)
-        .await
-        .expect_err("device code login should fail when workspace mismatches");
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-
-    let auth = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)
-        .context("auth.json should load after login fails")?;
-    assert!(
-        auth.is_none(),
-        "auth.json should not be created when workspace validation fails"
-    );
     Ok(())
 }
 
@@ -242,7 +203,6 @@ async fn device_code_login_integration_persists_without_api_key_on_exchange_fail
     let mut opts = ServerOptions::new(
         codex_home.path().to_path_buf(),
         "client-id".to_string(),
-        None,
         AuthCredentialsStoreMode::File,
     );
     opts.issuer = issuer;
@@ -292,7 +252,6 @@ async fn device_code_login_integration_handles_error_payload() -> anyhow::Result
     let mut opts = ServerOptions::new(
         codex_home.path().to_path_buf(),
         "client-id".to_string(),
-        None,
         AuthCredentialsStoreMode::File,
     );
     opts.issuer = issuer;

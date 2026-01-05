@@ -5,6 +5,9 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("This fork of codex only supports Linux.");
+
 pub mod api_bridge;
 mod apply_patch;
 pub mod auth;
@@ -50,7 +53,6 @@ pub mod token_data;
 mod truncate;
 mod unified_exec;
 mod user_instructions;
-pub use model_provider_info::CHAT_WIRE_API_DEPRECATION_SUMMARY;
 pub use model_provider_info::DEFAULT_LMSTUDIO_PORT;
 pub use model_provider_info::DEFAULT_OLLAMA_PORT;
 pub use model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
@@ -73,7 +75,6 @@ pub mod default_client;
 pub mod project_doc;
 mod rollout;
 pub(crate) mod safety;
-pub mod seatbelt;
 pub mod shell;
 pub mod shell_snapshot;
 pub mod skills;
@@ -105,7 +106,6 @@ pub use command_safety::is_safe_command;
 pub use exec_policy::ExecPolicyError;
 pub use exec_policy::load_exec_policy;
 pub use safety::get_platform_sandbox;
-pub use safety::set_windows_sandbox_enabled;
 // Re-export the protocol types from the standalone `codex-protocol` crate so existing
 // `codex_core::protocol::...` references continue to work across the workspace.
 pub use codex_protocol::protocol;

@@ -1,6 +1,4 @@
 use super::LoaderOverrides;
-#[cfg(target_os = "macos")]
-use super::macos::load_managed_admin_config_layer;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::io;
 use std::path::Path;
@@ -21,21 +19,12 @@ pub(super) struct MangedConfigFromFile {
 pub(super) struct LoadedConfigLayers {
     /// If present, data read from a file such as `/etc/codex/managed_config.toml`.
     pub managed_config: Option<MangedConfigFromFile>,
-    /// If present, data read from managed preferences (macOS only).
-    pub managed_config_from_mdm: Option<TomlValue>,
 }
 
 pub(super) async fn load_config_layers_internal(
     codex_home: &Path,
     overrides: LoaderOverrides,
 ) -> io::Result<LoadedConfigLayers> {
-    #[cfg(target_os = "macos")]
-    let LoaderOverrides {
-        managed_config_path,
-        managed_preferences_base64,
-    } = overrides;
-
-    #[cfg(not(target_os = "macos"))]
     let LoaderOverrides {
         managed_config_path,
     } = overrides;
@@ -51,17 +40,7 @@ pub(super) async fn load_config_layers_internal(
             file: managed_config_path.clone(),
         });
 
-    #[cfg(target_os = "macos")]
-    let managed_preferences =
-        load_managed_admin_config_layer(managed_preferences_base64.as_deref()).await?;
-
-    #[cfg(not(target_os = "macos"))]
-    let managed_preferences = None;
-
-    Ok(LoadedConfigLayers {
-        managed_config,
-        managed_config_from_mdm: managed_preferences,
-    })
+    Ok(LoadedConfigLayers { managed_config })
 }
 
 pub(super) async fn read_config_from_path(

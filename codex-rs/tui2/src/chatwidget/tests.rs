@@ -67,11 +67,6 @@ use tempfile::tempdir;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::unbounded_channel;
 
-#[cfg(target_os = "windows")]
-fn set_windows_sandbox_enabled(enabled: bool) {
-    codex_core::set_windows_sandbox_enabled(enabled);
-}
-
 async fn test_config() -> Config {
     // Use base defaults to avoid depending on host state.
     let codex_home = std::env::temp_dir();
@@ -301,10 +296,6 @@ async fn context_indicator_shows_used_tokens_when_window_unknown() {
     );
 }
 
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "system configuration APIs are blocked under macOS seatbelt"
-)]
 #[tokio::test]
 async fn helpers_are_available_and_do_not_panic() {
     let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
@@ -1754,7 +1745,7 @@ async fn preset_matching_ignores_extra_writable_roots() {
         .find(|p| p.id == "auto")
         .expect("auto preset exists");
     let current_sandbox = SandboxPolicy::WorkspaceWrite {
-        writable_roots: vec![AbsolutePathBuf::try_from("C:\\extra").unwrap()],
+        writable_roots: vec![AbsolutePathBuf::try_from("/extra").unwrap()],
         network_access: false,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
@@ -1782,47 +1773,6 @@ async fn full_access_confirmation_popup_snapshot() {
 
     let popup = render_bottom_popup(&chat, 80);
     assert_snapshot!("full_access_confirmation_popup", popup);
-}
-
-#[cfg(target_os = "windows")]
-#[tokio::test]
-async fn windows_auto_mode_prompt_requests_enabling_sandbox_feature() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-
-    let preset = builtin_approval_presets()
-        .into_iter()
-        .find(|preset| preset.id == "auto")
-        .expect("auto preset");
-    chat.open_windows_sandbox_enable_prompt(preset);
-
-    let popup = render_bottom_popup(&chat, 120);
-    assert!(
-        popup.contains("Agent mode on Windows uses an experimental sandbox"),
-        "expected auto mode prompt to mention enabling the sandbox feature, popup: {popup}"
-    );
-}
-
-#[cfg(target_os = "windows")]
-#[tokio::test]
-async fn startup_prompts_for_windows_sandbox_when_agent_requested() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-
-    set_windows_sandbox_enabled(false);
-    chat.config.forced_auto_mode_downgraded_on_windows = true;
-
-    chat.maybe_prompt_windows_sandbox_enable();
-
-    let popup = render_bottom_popup(&chat, 120);
-    assert!(
-        popup.contains("Agent mode on Windows uses an experimental sandbox"),
-        "expected startup prompt to explain sandbox: {popup}"
-    );
-    assert!(
-        popup.contains("Enable experimental sandbox"),
-        "expected startup prompt to offer enabling the sandbox: {popup}"
-    );
-
-    set_windows_sandbox_enabled(true);
 }
 
 #[tokio::test]

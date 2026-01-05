@@ -2,14 +2,11 @@ use std::sync::Arc;
 
 use crate::api_bridge::auth_provider_from_auth;
 use crate::api_bridge::map_api_error;
-use codex_api::AggregateStreamExt;
-use codex_api::ChatClient as ApiChatClient;
 use codex_api::CompactClient as ApiCompactClient;
 use codex_api::CompactionInput as ApiCompactionInput;
 use codex_api::Prompt as ApiPrompt;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
-use codex_api::ResponseStream as ApiResponseStream;
 use codex_api::ResponsesClient as ApiResponsesClient;
 use codex_api::ResponsesOptions as ApiResponsesOptions;
 use codex_api::SseTelemetry;
@@ -48,9 +45,7 @@ use crate::error::Result;
 use crate::features::FEATURES;
 use crate::flags::CODEX_RS_SSE_FIXTURE;
 use crate::model_provider_info::ModelProviderInfo;
-use crate::model_provider_info::WireApi;
 use crate::models_manager::model_family::ModelFamily;
-use crate::tools::spec::create_tools_json_for_chat_completions_api;
 use crate::tools::spec::create_tools_json_for_responses_api;
 
 #[derive(Debug, Clone)]
@@ -108,83 +103,9 @@ impl ModelClient {
         &self.provider
     }
 
-    /// Streams a single model turn using either the Responses or Chat
-    /// Completions wire API, depending on the configured provider.
-    ///
-    /// For Chat providers, the underlying stream is optionally aggregated
-    /// based on the `show_raw_agent_reasoning` flag in the config.
+    /// Streams a single model turn using the OpenAI Responses API.
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
-        match self.provider.wire_api {
-            WireApi::Responses => self.stream_responses_api(prompt).await,
-            WireApi::Chat => {
-                let api_stream = self.stream_chat_completions(prompt).await?;
-
-                if self.config.show_raw_agent_reasoning {
-                    Ok(map_response_stream(
-                        api_stream.streaming_mode(),
-                        self.otel_manager.clone(),
-                    ))
-                } else {
-                    Ok(map_response_stream(
-                        api_stream.aggregate(),
-                        self.otel_manager.clone(),
-                    ))
-                }
-            }
-        }
-    }
-
-    /// Streams a turn via the OpenAI Chat Completions API.
-    ///
-    /// This path is only used when the provider is configured with
-    /// `WireApi::Chat`; it does not support `output_schema` today.
-    async fn stream_chat_completions(&self, prompt: &Prompt) -> Result<ApiResponseStream> {
-        if prompt.output_schema.is_some() {
-            return Err(CodexErr::UnsupportedOperation(
-                "output_schema is not supported for Chat Completions API".to_string(),
-            ));
-        }
-
-        let auth_manager = self.auth_manager.clone();
-        let model_family = self.get_model_family();
-        let instructions = prompt.get_full_instructions(&model_family).into_owned();
-        let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
-        let api_prompt = build_api_prompt(prompt, instructions, tools_json);
-        let conversation_id = self.conversation_id.to_string();
-        let session_source = self.session_source.clone();
-
-        let mut refreshed = false;
-        loop {
-            let auth = auth_manager.as_ref().and_then(|m| m.auth());
-            let api_provider = self
-                .provider
-                .to_api_provider(auth.as_ref().map(|a| a.mode))?;
-            let api_auth = auth_provider_from_auth(auth.clone(), &self.provider).await?;
-            let transport = ReqwestTransport::new(build_reqwest_client());
-            let (request_telemetry, sse_telemetry) = self.build_streaming_telemetry();
-            let client = ApiChatClient::new(transport, api_provider, api_auth)
-                .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
-
-            let stream_result = client
-                .stream_prompt(
-                    &self.get_model(),
-                    &api_prompt,
-                    Some(conversation_id.clone()),
-                    Some(session_source.clone()),
-                )
-                .await;
-
-            match stream_result {
-                Ok(stream) => return Ok(stream),
-                Err(ApiError::Transport(TransportError::Http { status, .. }))
-                    if status == StatusCode::UNAUTHORIZED =>
-                {
-                    handle_unauthorized(status, &mut refreshed, &auth_manager, &auth).await?;
-                    continue;
-                }
-                Err(err) => return Err(map_api_error(err)),
-            }
-        }
+        self.stream_responses_api(prompt).await
     }
 
     /// Streams a turn via the OpenAI Responses API.
