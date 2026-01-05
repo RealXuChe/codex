@@ -237,22 +237,17 @@ pub struct Config {
     /// resolved against this path.
     pub cwd: PathBuf,
 
-    /// Preferred store for CLI auth credentials.
-    /// file (default): Use a file in the Codex home directory.
-    /// keyring: Use an OS-specific keyring service.
-    /// auto: Use the OS-specific keyring service if available, otherwise use a file.
+    /// Store for CLI auth credentials.
+    ///
+    /// This fork supports file storage only (`CODEX_HOME/auth.json`).
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
-    /// Preferred store for MCP OAuth credentials.
-    /// keyring: Use an OS-specific keyring service.
-    ///          Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.
-    ///          https://github.com/openai/codex/blob/main/codex-rs/rmcp-client/src/oauth.rs#L2
-    /// file: CODEX_HOME/.credentials.json
-    ///       This file will be readable to Codex and other applications running as the same user.
-    /// auto (default): keyring if available, otherwise file.
+    /// Store for MCP OAuth credentials.
+    ///
+    /// This fork supports file storage only (`CODEX_HOME/.credentials.json`).
     pub mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode,
 
     /// Combined provider map (defaults merged with user-defined overrides).
@@ -705,10 +700,9 @@ pub struct ConfigToml {
     #[serde(default)]
     pub forced_login_method: Option<ForcedLoginMethod>,
 
-    /// Preferred backend for storing CLI auth credentials.
-    /// file (default): Use a file in the Codex home directory.
-    /// keyring: Use an OS-specific keyring service.
-    /// auto: Use the keyring if available, otherwise use a file.
+    /// Store for CLI auth credentials.
+    ///
+    /// This fork supports file storage only (`CODEX_HOME/auth.json`).
     #[serde(default)]
     pub cli_auth_credentials_store: Option<AuthCredentialsStoreMode>,
 
@@ -716,11 +710,9 @@ pub struct ConfigToml {
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
-    /// Preferred backend for storing MCP OAuth credentials.
-    /// keyring: Use an OS-specific keyring service.
-    ///          https://github.com/openai/codex/blob/main/codex-rs/rmcp-client/src/oauth.rs#L2
-    /// file: Use a file in the Codex home directory.
-    /// auto (default): Use the OS-specific keyring service if available, otherwise use a file.
+    /// Store for MCP OAuth credentials.
+    ///
+    /// This fork supports file storage only (`CODEX_HOME/.credentials.json`).
     #[serde(default)]
     pub mcp_oauth_credentials_store: Option<OAuthCredentialsStoreMode>,
 
@@ -1732,10 +1724,10 @@ trust_level = "trusted"
     }
 
     #[test]
-    fn config_honors_explicit_keyring_auth_store_mode() -> std::io::Result<()> {
+    fn config_honors_explicit_file_cli_auth_store_mode() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let cfg = ConfigToml {
-            cli_auth_credentials_store: Some(AuthCredentialsStoreMode::Keyring),
+            cli_auth_credentials_store: Some(AuthCredentialsStoreMode::File),
             ..Default::default()
         };
 
@@ -1747,14 +1739,14 @@ trust_level = "trusted"
 
         assert_eq!(
             config.cli_auth_credentials_store_mode,
-            AuthCredentialsStoreMode::Keyring,
+            AuthCredentialsStoreMode::File,
         );
 
         Ok(())
     }
 
     #[test]
-    fn config_defaults_to_auto_oauth_store_mode() -> std::io::Result<()> {
+    fn config_defaults_to_file_oauth_store_mode() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let cfg = ConfigToml::default();
 
@@ -1766,7 +1758,7 @@ trust_level = "trusted"
 
         assert_eq!(
             config.mcp_oauth_credentials_store_mode,
-            OAuthCredentialsStoreMode::Auto,
+            OAuthCredentialsStoreMode::File,
         );
 
         Ok(())
@@ -1944,8 +1936,8 @@ trust_level = "trusted"
         let managed_path = codex_home.path().join("managed_config.toml");
         let config_path = codex_home.path().join(CONFIG_TOML_FILE);
 
-        std::fs::write(&config_path, "mcp_oauth_credentials_store = \"file\"\n")?;
-        std::fs::write(&managed_path, "mcp_oauth_credentials_store = \"keyring\"\n")?;
+        std::fs::write(&config_path, "")?;
+        std::fs::write(&managed_path, "mcp_oauth_credentials_store = \"file\"\n")?;
 
         let overrides = LoaderOverrides {
             managed_config_path: Some(managed_path.clone()),
@@ -1964,7 +1956,7 @@ trust_level = "trusted"
         })?;
         assert_eq!(
             cfg.mcp_oauth_credentials_store,
-            Some(OAuthCredentialsStoreMode::Keyring),
+            Some(OAuthCredentialsStoreMode::File),
         );
 
         let final_config = Config::load_from_base_config_with_overrides(
@@ -1974,7 +1966,7 @@ trust_level = "trusted"
         )?;
         assert_eq!(
             final_config.mcp_oauth_credentials_store_mode,
-            OAuthCredentialsStoreMode::Keyring,
+            OAuthCredentialsStoreMode::File,
         );
 
         Ok(())
