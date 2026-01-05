@@ -5,6 +5,9 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("This fork of codex only supports Linux.");
+
 pub mod api_bridge;
 mod apply_patch;
 pub mod auth;
