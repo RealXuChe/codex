@@ -617,17 +617,71 @@ fn load_auth(
     let Some(auth_dot_json) = load_auth_dot_json_migrated(&storage)? else {
         return Ok(None);
     };
-    if let Some(entry) = auth_dot_json.api_keys.iter().min_by_key(|entry| entry.id) {
-        return Ok(Some(Auth::ApiKey {
-            handle: ApiKeyAuth::new(entry.api_key.clone()),
-        }));
+    Ok(select_auth_from_auth_dot_json(auth_dot_json, storage, client))
+}
+
+#[derive(Debug)]
+struct LoadedAuthState {
+    auth: Option<Auth>,
+    auth_dot_json: Option<AuthDotJson>,
+    auth_load_error: Option<String>,
+}
+
+fn load_auth_state(
+    codex_home: &Path,
+    enable_codex_api_key_env: bool,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> LoadedAuthState {
+    if enable_codex_api_key_env && let Some(api_key) = read_codex_api_key_from_env() {
+        return LoadedAuthState {
+            auth: Some(Auth::ApiKey {
+                handle: ApiKeyAuth::new(api_key),
+            }),
+            auth_dot_json: None,
+            auth_load_error: None,
+        };
     }
 
-    // Prefer AuthMode.ApiKey if it's set in the legacy auth.json field.
+    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    let client = crate::default_client::create_client();
+
+    match load_auth_dot_json_migrated(&storage) {
+        Ok(Some(auth_dot_json)) => {
+            let auth = select_auth_from_auth_dot_json(auth_dot_json.clone(), storage, client);
+            LoadedAuthState {
+                auth,
+                auth_dot_json: Some(auth_dot_json),
+                auth_load_error: None,
+            }
+        }
+        Ok(None) => LoadedAuthState {
+            auth: None,
+            auth_dot_json: None,
+            auth_load_error: None,
+        },
+        Err(err) => LoadedAuthState {
+            auth: None,
+            auth_dot_json: None,
+            auth_load_error: Some(err.to_string()),
+        },
+    }
+}
+
+fn select_auth_from_auth_dot_json(
+    auth_dot_json: AuthDotJson,
+    storage: Arc<dyn AuthStorageBackend>,
+    client: CodexHttpClient,
+) -> Option<Auth> {
+    if let Some(entry) = auth_dot_json.api_keys.iter().min_by_key(|entry| entry.id) {
+        return Some(Auth::ApiKey {
+            handle: ApiKeyAuth::new(entry.api_key.clone()),
+        });
+    }
+
     if let Some(api_key) = auth_dot_json.openai_api_key.as_ref() {
-        return Ok(Some(Auth::ApiKey {
+        return Some(Auth::ApiKey {
             handle: ApiKeyAuth::new(api_key.clone()),
-        }));
+        });
     }
 
     if !auth_dot_json.chatgpt_entries.is_empty() {
@@ -639,23 +693,23 @@ fn load_auth(
             }
         }
         if let Some(chatgpt_key) = selected {
-            return Ok(Some(Auth::ChatGpt {
+            return Some(Auth::ChatGpt {
                 handle: CodexAuth {
-                    storage: storage.clone(),
+                    storage,
                     auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
                     chatgpt_key: Some(chatgpt_key),
                     client,
                 },
-            }));
+            });
         }
     }
 
     let tokens = auth_dot_json.tokens.clone();
     let last_refresh = auth_dot_json.last_refresh;
     if tokens.is_some() {
-        return Ok(Some(Auth::ChatGpt {
+        return Some(Auth::ChatGpt {
             handle: CodexAuth {
-                storage: storage.clone(),
+                storage,
                 auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
                     openai_api_key: None,
                     chatgpt_entries: Vec::new(),
@@ -666,10 +720,10 @@ fn load_auth(
                 chatgpt_key: None,
                 client,
             },
-        }));
+        });
     }
 
-    Ok(None)
+    None
 }
 
 #[cfg(test)]
@@ -819,20 +873,12 @@ fn refresh_token_endpoint() -> String {
         .unwrap_or_else(|_| REFRESH_TOKEN_URL.to_string())
 }
 
-use std::sync::RwLock;
-
 /// Internal cached auth state.
 #[derive(Clone, Debug)]
 struct CachedAuth {
     auth: Option<Auth>,
-}
-
-fn auths_equal(a: &Option<Auth>, b: &Option<Auth>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => a.mode() == b.mode(),
-        _ => false,
-    }
+    auth_dot_json: Option<AuthDotJson>,
+    auth_load_error: Option<String>,
 }
 
 #[cfg(test)]
@@ -1229,16 +1275,18 @@ impl AuthManager {
         enable_codex_api_key_env: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
     ) -> Self {
-        let auth = load_auth(
+        let loaded = load_auth_state(
             &codex_home,
             enable_codex_api_key_env,
             auth_credentials_store_mode,
-        )
-        .ok()
-        .flatten();
+        );
         Self {
             codex_home,
-            inner: RwLock::new(CachedAuth { auth }),
+            inner: RwLock::new(CachedAuth {
+                auth: loaded.auth,
+                auth_dot_json: loaded.auth_dot_json,
+                auth_load_error: loaded.auth_load_error,
+            }),
             enable_codex_api_key_env,
             auth_credentials_store_mode,
         }
@@ -1250,6 +1298,8 @@ impl AuthManager {
     pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
         let cached = CachedAuth {
             auth: Some(Auth::ChatGpt { handle: auth }),
+            auth_dot_json: None,
+            auth_load_error: None,
         };
         let temp_dir = tempfile::tempdir().expect("temp codex home");
         let codex_home = temp_dir.path().to_path_buf();
@@ -1272,6 +1322,8 @@ impl AuthManager {
             auth: Some(Auth::ApiKey {
                 handle: ApiKeyAuth::new(api_key.to_string()),
             }),
+            auth_dot_json: None,
+            auth_load_error: None,
         };
         let temp_dir = tempfile::tempdir().expect("temp codex home");
         let codex_home = temp_dir.path().to_path_buf();
@@ -1292,6 +1344,8 @@ impl AuthManager {
     pub fn from_auth_for_testing_with_home(auth: CodexAuth, codex_home: PathBuf) -> Arc<Self> {
         let cached = CachedAuth {
             auth: Some(Auth::ChatGpt { handle: auth }),
+            auth_dot_json: None,
+            auth_load_error: None,
         };
         Arc::new(Self {
             codex_home,
@@ -1307,6 +1361,8 @@ impl AuthManager {
             auth: Some(Auth::ApiKey {
                 handle: ApiKeyAuth::new(api_key.to_string()),
             }),
+            auth_dot_json: None,
+            auth_load_error: None,
         };
         Arc::new(Self {
             codex_home,
@@ -1328,16 +1384,17 @@ impl AuthManager {
     /// Force a reload of the auth information from auth.json. Returns
     /// whether the auth value changed.
     pub fn reload(&self) -> bool {
-        let new_auth = load_auth(
+        let loaded = load_auth_state(
             &self.codex_home,
             self.enable_codex_api_key_env,
             self.auth_credentials_store_mode,
-        )
-        .ok()
-        .flatten();
+        );
         if let Ok(mut guard) = self.inner.write() {
-            let changed = !auths_equal(&guard.auth, &new_auth);
-            guard.auth = new_auth;
+            let changed = guard.auth_load_error != loaded.auth_load_error
+                || guard.auth_dot_json != loaded.auth_dot_json;
+            guard.auth = loaded.auth;
+            guard.auth_dot_json = loaded.auth_dot_json;
+            guard.auth_load_error = loaded.auth_load_error;
             changed
         } else {
             false
