@@ -13,10 +13,13 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use codex_app_server_protocol::AuthMode;
 use codex_protocol::config_types::ForcedLoginMethod;
+use sha2::Digest;
+use sha2::Sha256;
 
 pub use crate::auth::storage::AuthCredentialsStoreMode;
 pub use crate::auth::storage::AuthDotJson;
@@ -412,7 +415,7 @@ pub fn login_with_api_key(
     {
         existing.api_key = api_key.to_string();
     } else {
-        let id = next_entry_id(auth_dot_json.api_keys.iter().map(|e| e.id));
+        let id = next_global_entry_id(&auth_dot_json);
         auth_dot_json.api_keys.push(crate::auth::storage::ApiKeyAuthEntry {
             id,
             name: None,
@@ -454,7 +457,7 @@ pub fn persist_chatgpt_tokens(
         existing.tokens = tokens;
         existing.last_refresh = Some(Utc::now());
     } else {
-        let id = next_entry_id(auth_dot_json.chatgpt_entries.iter().map(|e| e.id));
+        let id = next_global_entry_id(&auth_dot_json);
         auth_dot_json.chatgpt_entries.push(ChatGptAuthEntry {
             id,
             name: None,
@@ -470,15 +473,22 @@ pub fn persist_chatgpt_tokens(
     storage.save(&auth_dot_json)
 }
 
-fn next_entry_id(ids: impl Iterator<Item = u32>) -> u32 {
-    ids.max().unwrap_or(0).saturating_add(1)
+fn next_global_entry_id(auth_dot_json: &AuthDotJson) -> u32 {
+    let max_id = auth_dot_json
+        .api_keys
+        .iter()
+        .map(|e| e.id)
+        .chain(auth_dot_json.chatgpt_entries.iter().map(|e| e.id))
+        .max()
+        .unwrap_or(0);
+    max_id.saturating_add(1)
 }
 
 fn migrate_legacy_auth_dot_json(auth_dot_json: &mut AuthDotJson) {
     if let Some(api_key) = auth_dot_json.openai_api_key.take()
         && auth_dot_json.api_keys.iter().all(|entry| entry.api_key != api_key)
     {
-        let id = next_entry_id(auth_dot_json.api_keys.iter().map(|e| e.id));
+        let id = next_global_entry_id(auth_dot_json);
         auth_dot_json
             .api_keys
             .push(crate::auth::storage::ApiKeyAuthEntry {
@@ -494,7 +504,7 @@ fn migrate_legacy_auth_dot_json(auth_dot_json: &mut AuthDotJson) {
             .iter()
             .all(|entry| entry.tokens != tokens)
         {
-            let id = next_entry_id(auth_dot_json.chatgpt_entries.iter().map(|e| e.id));
+            let id = next_global_entry_id(auth_dot_json);
             auth_dot_json.chatgpt_entries.push(ChatGptAuthEntry {
                 id,
                 name: None,
@@ -726,6 +736,39 @@ fn select_auth_from_auth_dot_json(
     None
 }
 
+fn select_auth_from_auth_dot_json_with_override(
+    auth_dot_json: AuthDotJson,
+    active_override: &ActiveOverride,
+    storage: Arc<dyn AuthStorageBackend>,
+    client: CodexHttpClient,
+) -> Option<Auth> {
+    match active_override {
+        ActiveOverride::ChatGpt(key) => {
+            if auth_dot_json.chatgpt_entries.iter().any(|entry| {
+                ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key)
+            }) {
+                Some(Auth::ChatGpt {
+                    handle: CodexAuth {
+                        storage,
+                        auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
+                        chatgpt_key: Some(key.clone()),
+                        client,
+                    },
+                })
+            } else {
+                None
+            }
+        }
+        ActiveOverride::ApiKeyFingerprint(fp) => auth_dot_json
+            .api_keys
+            .iter()
+            .find(|entry| api_key_fingerprint(&entry.api_key) == *fp)
+            .map(|entry| Auth::ApiKey {
+                handle: ApiKeyAuth::new(entry.api_key.clone()),
+            }),
+    }
+}
+
 #[cfg(test)]
 async fn update_tokens(
     storage: &Arc<dyn AuthStorageBackend>,
@@ -879,6 +922,33 @@ struct CachedAuth {
     auth: Option<Auth>,
     auth_dot_json: Option<AuthDotJson>,
     auth_load_error: Option<String>,
+    active_override: Option<ActiveOverride>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ActiveOverride {
+    ChatGpt(ChatGptKey),
+    ApiKeyFingerprint(String),
+}
+
+fn active_override_from_auth(auth: &Auth) -> Option<ActiveOverride> {
+    match auth {
+        Auth::ChatGpt { handle } => handle.chatgpt_key.clone().map(ActiveOverride::ChatGpt),
+        Auth::ApiKey { handle } => Some(ActiveOverride::ApiKeyFingerprint(api_key_fingerprint(
+            handle.as_str(),
+        ))),
+    }
+}
+
+fn api_key_fingerprint(api_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(api_key.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1280,12 +1350,14 @@ impl AuthManager {
             enable_codex_api_key_env,
             auth_credentials_store_mode,
         );
+        let active_override = loaded.auth.as_ref().and_then(active_override_from_auth);
         Self {
             codex_home,
             inner: RwLock::new(CachedAuth {
                 auth: loaded.auth,
                 auth_dot_json: loaded.auth_dot_json,
                 auth_load_error: loaded.auth_load_error,
+                active_override,
             }),
             enable_codex_api_key_env,
             auth_credentials_store_mode,
@@ -1300,6 +1372,7 @@ impl AuthManager {
             auth: Some(Auth::ChatGpt { handle: auth }),
             auth_dot_json: None,
             auth_load_error: None,
+            active_override: None,
         };
         let temp_dir = tempfile::tempdir().expect("temp codex home");
         let codex_home = temp_dir.path().to_path_buf();
@@ -1324,6 +1397,7 @@ impl AuthManager {
             }),
             auth_dot_json: None,
             auth_load_error: None,
+            active_override: None,
         };
         let temp_dir = tempfile::tempdir().expect("temp codex home");
         let codex_home = temp_dir.path().to_path_buf();
@@ -1346,6 +1420,7 @@ impl AuthManager {
             auth: Some(Auth::ChatGpt { handle: auth }),
             auth_dot_json: None,
             auth_load_error: None,
+            active_override: None,
         };
         Arc::new(Self {
             codex_home,
@@ -1363,6 +1438,7 @@ impl AuthManager {
             }),
             auth_dot_json: None,
             auth_load_error: None,
+            active_override: None,
         };
         Arc::new(Self {
             codex_home,
@@ -1375,6 +1451,69 @@ impl AuthManager {
     /// Current cached auth (clone). May be `None` if not logged in or load failed.
     pub fn auth(&self) -> Option<Auth> {
         self.inner.read().ok().and_then(|c| c.auth.clone())
+    }
+
+    pub fn active_credential_id(&self) -> Option<u32> {
+        let guard = self.inner.read().ok()?;
+        let auth_dot_json = guard.auth_dot_json.as_ref()?;
+        let active = guard.active_override.as_ref()?;
+        match active {
+            ActiveOverride::ChatGpt(key) => auth_dot_json
+                .chatgpt_entries
+                .iter()
+                .find(|entry| ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key))
+                .map(|entry| entry.id),
+            ActiveOverride::ApiKeyFingerprint(fp) => auth_dot_json
+                .api_keys
+                .iter()
+                .find(|entry| api_key_fingerprint(&entry.api_key) == *fp)
+                .map(|entry| entry.id),
+        }
+    }
+
+    pub fn activate_credential_by_id(&self, id: u32) -> std::io::Result<()> {
+        let mut guard = self
+            .inner
+            .write()
+            .map_err(|_| std::io::Error::other("Auth manager lock poisoned"))?;
+        let auth_dot_json = guard
+            .auth_dot_json
+            .clone()
+            .ok_or_else(|| std::io::Error::other("Not logged in"))?;
+
+        if let Some(entry) = auth_dot_json.chatgpt_entries.iter().find(|entry| entry.id == id) {
+            let key = ChatGptKey::from_tokens(&entry.tokens)
+                .ok_or_else(|| std::io::Error::other("ChatGPT credential missing identity"))?;
+            let storage = create_auth_storage(
+                self.codex_home.clone(),
+                self.auth_credentials_store_mode,
+            );
+            let client = crate::default_client::create_client();
+            let auth = select_auth_from_auth_dot_json_with_override(
+                auth_dot_json,
+                &ActiveOverride::ChatGpt(key.clone()),
+                storage,
+                client,
+            )
+            .ok_or_else(|| std::io::Error::other("Credential not found"))?;
+            guard.auth = Some(auth);
+            guard.active_override = Some(ActiveOverride::ChatGpt(key));
+            return Ok(());
+        }
+
+        if let Some(entry) = auth_dot_json.api_keys.iter().find(|entry| entry.id == id) {
+            guard.auth = Some(Auth::ApiKey {
+                handle: ApiKeyAuth::new(entry.api_key.clone()),
+            });
+            guard.active_override = Some(ActiveOverride::ApiKeyFingerprint(api_key_fingerprint(
+                &entry.api_key,
+            )));
+            return Ok(());
+        }
+
+        Err(std::io::Error::other(format!(
+            "Credential id {id} does not exist"
+        )))
     }
 
     pub fn codex_home(&self) -> &Path {
@@ -1392,9 +1531,35 @@ impl AuthManager {
         if let Ok(mut guard) = self.inner.write() {
             let changed = guard.auth_load_error != loaded.auth_load_error
                 || guard.auth_dot_json != loaded.auth_dot_json;
-            guard.auth = loaded.auth;
+            let mut next_auth = loaded.auth;
+            if let Some(active_override) = guard.active_override.as_ref()
+                && let Some(auth_dot_json) = loaded.auth_dot_json.clone()
+            {
+                let storage = create_auth_storage(
+                    self.codex_home.clone(),
+                    self.auth_credentials_store_mode,
+                );
+                let client = crate::default_client::create_client();
+                if let Some(overridden) = select_auth_from_auth_dot_json_with_override(
+                    auth_dot_json,
+                    active_override,
+                    storage,
+                    client,
+                ) {
+                    next_auth = Some(overridden);
+                } else {
+                    guard.active_override = None;
+                }
+            }
+
+            guard.auth = next_auth;
             guard.auth_dot_json = loaded.auth_dot_json;
             guard.auth_load_error = loaded.auth_load_error;
+            if guard.active_override.is_none()
+                && let Some(auth) = guard.auth.as_ref()
+            {
+                guard.active_override = active_override_from_auth(auth);
+            }
             changed
         } else {
             false
