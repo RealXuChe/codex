@@ -20,6 +20,7 @@ use codex_protocol::config_types::ForcedLoginMethod;
 
 pub use crate::auth::storage::AuthCredentialsStoreMode;
 pub use crate::auth::storage::AuthDotJson;
+use crate::auth::storage::ChatGptAuthEntry;
 use crate::auth::storage::AuthStorageBackend;
 use crate::auth::storage::create_auth_storage;
 use crate::config::Config;
@@ -41,6 +42,7 @@ use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct CodexAuth {
+    chatgpt_key: Option<ChatGptKey>,
     pub(crate) auth_dot_json: Arc<Mutex<Option<AuthDotJson>>>,
     storage: Arc<dyn AuthStorageBackend>,
     pub(crate) client: CodexHttpClient,
@@ -101,6 +103,26 @@ impl Auth {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ChatGptKey {
+    account_id: String,
+    chatgpt_user_id: String,
+}
+
+impl ChatGptKey {
+    fn from_tokens(tokens: &TokenData) -> Option<Self> {
+        let account_id = tokens
+            .account_id
+            .clone()
+            .or_else(|| tokens.id_token.chatgpt_account_id.clone())?;
+        let chatgpt_user_id = tokens.id_token.chatgpt_user_id.clone()?;
+        Some(Self {
+            account_id,
+            chatgpt_user_id,
+        })
+    }
+}
+
 // TODO(pakrym): use token exp field to check for expiration instead
 const TOKEN_REFRESH_INTERVAL: i64 = 8;
 
@@ -130,10 +152,6 @@ impl RefreshTokenError {
             Self::Transient(_) => None,
         }
     }
-
-    fn other_with_message(message: impl Into<String>) -> Self {
-        Self::Transient(std::io::Error::other(message.into()))
-    }
 }
 
 impl From<RefreshTokenError> for std::io::Error {
@@ -148,87 +166,105 @@ impl From<RefreshTokenError> for std::io::Error {
 impl CodexAuth {
     pub async fn refresh_token(&self) -> Result<String, RefreshTokenError> {
         tracing::info!("Refreshing token");
+        let updated = self.refresh_current_tokens(None).await?;
+        Ok(updated.access_token)
+    }
 
+    async fn refresh_current_tokens(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<TokenData, RefreshTokenError> {
         let token_data = self.get_current_token_data().ok_or_else(|| {
             RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
         })?;
-        let token = token_data.refresh_token;
 
-        let refresh_response = try_refresh_token(token, &self.client).await?;
+        let refresh = try_refresh_token(token_data.refresh_token.clone(), &self.client);
+        let refresh_response = if let Some(timeout) = timeout {
+            match tokio::time::timeout(timeout, refresh).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(RefreshTokenError::Transient(std::io::Error::new(
+                        ErrorKind::TimedOut,
+                        "timed out while refreshing token",
+                    )));
+                }
+            }
+        } else {
+            refresh.await?
+        };
+        let mut auth_dot_json = self.get_current_auth_json().ok_or_else(|| {
+            RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
+        })?;
 
-        let updated = update_tokens(
-            &self.storage,
-            refresh_response.id_token,
-            refresh_response.access_token,
-            refresh_response.refresh_token,
-        )
-        .await
-        .map_err(RefreshTokenError::from)?;
-
-        if let Ok(mut auth_lock) = self.auth_dot_json.lock() {
-            *auth_lock = Some(updated.clone());
+        let mut updated_tokens = token_data.clone();
+        if let Some(id_token) = refresh_response.id_token {
+            updated_tokens.id_token = parse_id_token(&id_token)
+                .map_err(|err| RefreshTokenError::Transient(std::io::Error::other(err)))?;
+            updated_tokens.account_id = updated_tokens
+                .account_id
+                .clone()
+                .or_else(|| updated_tokens.id_token.chatgpt_account_id.clone());
+        }
+        if let Some(access_token) = refresh_response.access_token {
+            updated_tokens.access_token = access_token;
+        }
+        if let Some(refresh_token) = refresh_response.refresh_token {
+            updated_tokens.refresh_token = refresh_token;
         }
 
-        let access = match updated.tokens {
-            Some(t) => t.access_token,
-            None => {
-                return Err(RefreshTokenError::other_with_message(
-                    "Token data is not available after refresh.",
-                ));
-            }
-        };
-        Ok(access)
+        let now = Utc::now();
+        if self.chatgpt_key.is_some() {
+            let entry = self.get_current_chatgpt_entry_mut(&mut auth_dot_json).ok_or_else(|| {
+                RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
+            })?;
+            entry.tokens = updated_tokens.clone();
+            entry.last_refresh = Some(now);
+        } else {
+            auth_dot_json.tokens = Some(updated_tokens.clone());
+            auth_dot_json.last_refresh = Some(now);
+        }
+
+        self.storage
+            .save(&auth_dot_json)
+            .map_err(RefreshTokenError::from)?;
+
+        if let Ok(mut auth_lock) = self.auth_dot_json.lock() {
+            *auth_lock = Some(auth_dot_json);
+        }
+
+        Ok(updated_tokens)
     }
 
     pub async fn get_token_data(&self) -> Result<TokenData, std::io::Error> {
-        let auth_dot_json: Option<AuthDotJson> = self.get_current_auth_json();
-        match auth_dot_json {
-            Some(AuthDotJson {
-                tokens: Some(mut tokens),
-                last_refresh: Some(last_refresh),
-                ..
-            }) => {
-                if last_refresh < Utc::now() - chrono::Duration::days(TOKEN_REFRESH_INTERVAL) {
-                    let refresh_result = tokio::time::timeout(
-                        Duration::from_secs(60),
-                        try_refresh_token(tokens.refresh_token.clone(), &self.client),
-                    )
-                    .await;
-                    let refresh_response = match refresh_result {
-                        Ok(Ok(response)) => response,
-                        Ok(Err(err)) => return Err(err.into()),
-                        Err(_) => {
-                            return Err(std::io::Error::new(
-                                ErrorKind::TimedOut,
-                                "timed out while refreshing OpenAI API key",
-                            ));
-                        }
-                    };
+        let auth_dot_json = self
+            .get_current_auth_json()
+            .ok_or(std::io::Error::other("Token data is not available."))?;
 
-                    let updated_auth_dot_json = update_tokens(
-                        &self.storage,
-                        refresh_response.id_token,
-                        refresh_response.access_token,
-                        refresh_response.refresh_token,
-                    )
-                    .await?;
-
-                    tokens = updated_auth_dot_json
+        let (tokens, last_refresh) =
+            if let Some(entry) = self.get_current_chatgpt_entry(&auth_dot_json) {
+                (entry.tokens.clone(), entry.last_refresh)
+            } else {
+                (
+                    auth_dot_json
                         .tokens
                         .clone()
-                        .ok_or(std::io::Error::other(
-                            "Token data is not available after refresh.",
-                        ))?;
+                        .ok_or(std::io::Error::other("Token data is not available."))?,
+                    auth_dot_json.last_refresh,
+                )
+            };
 
-                    #[expect(clippy::unwrap_used)]
-                    let mut auth_lock = self.auth_dot_json.lock().unwrap();
-                    *auth_lock = Some(updated_auth_dot_json);
-                }
+        let Some(last_refresh) = last_refresh else {
+            return Err(std::io::Error::other("Token data is not available."));
+        };
 
-                Ok(tokens)
-            }
-            _ => Err(std::io::Error::other("Token data is not available.")),
+        if last_refresh < Utc::now() - chrono::Duration::days(TOKEN_REFRESH_INTERVAL) {
+            return self
+                .refresh_current_tokens(Some(Duration::from_secs(60)))
+                .await
+                .map_err(std::io::Error::from);
         }
+
+        Ok(tokens)
     }
 
     pub async fn get_token(&self) -> Result<String, std::io::Error> {
@@ -271,8 +307,32 @@ impl CodexAuth {
         self.auth_dot_json.lock().unwrap().clone()
     }
 
+    fn get_current_chatgpt_entry<'a>(
+        &self,
+        auth_dot_json: &'a AuthDotJson,
+    ) -> Option<&'a ChatGptAuthEntry> {
+        let key = self.chatgpt_key.as_ref()?;
+        auth_dot_json.chatgpt_entries.iter().find(|entry| {
+            ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key)
+        })
+    }
+
+    fn get_current_chatgpt_entry_mut<'a>(
+        &self,
+        auth_dot_json: &'a mut AuthDotJson,
+    ) -> Option<&'a mut ChatGptAuthEntry> {
+        let key = self.chatgpt_key.as_ref()?;
+        auth_dot_json.chatgpt_entries.iter_mut().find(|entry| {
+            ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key)
+        })
+    }
+
     fn get_current_token_data(&self) -> Option<TokenData> {
-        self.get_current_auth_json().and_then(|t| t.tokens)
+        let auth_dot_json = self.get_current_auth_json()?;
+        if let Some(entry) = self.get_current_chatgpt_entry(&auth_dot_json) {
+            return Some(entry.tokens.clone());
+        }
+        auth_dot_json.tokens
     }
 
     /// Consider this private to integration tests.
@@ -294,6 +354,7 @@ impl CodexAuth {
         Self {
             storage: create_auth_storage(PathBuf::new(), AuthCredentialsStoreMode::File),
             auth_dot_json,
+            chatgpt_key: None,
             client: crate::default_client::create_client(),
         }
     }
@@ -439,37 +500,62 @@ fn load_auth(
         Some(auth) => auth,
         None => return Ok(None),
     };
+    if let Some(entry) = auth_dot_json.api_keys.iter().min_by_key(|entry| entry.id) {
+        return Ok(Some(Auth::ApiKey {
+            handle: ApiKeyAuth::new(entry.api_key.clone()),
+        }));
+    }
 
-    let AuthDotJson {
-        openai_api_key: auth_json_api_key,
-        chatgpt_entries: _,
-        api_keys: _,
-        tokens,
-        last_refresh,
-    } = auth_dot_json;
-
-    // Prefer AuthMode.ApiKey if it's set in the auth.json.
-    if let Some(api_key) = &auth_json_api_key {
+    // Prefer AuthMode.ApiKey if it's set in the legacy auth.json field.
+    if let Some(api_key) = auth_dot_json.openai_api_key.as_ref() {
         return Ok(Some(Auth::ApiKey {
             handle: ApiKeyAuth::new(api_key.clone()),
         }));
     }
 
-    Ok(Some(Auth::ChatGpt {
-        handle: CodexAuth {
-            storage: storage.clone(),
-            auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
-                openai_api_key: None,
-                chatgpt_entries: Vec::new(),
-                api_keys: Vec::new(),
-                tokens,
-                last_refresh,
-            }))),
-            client,
-        },
-    }))
+    if !auth_dot_json.chatgpt_entries.is_empty() {
+        let mut selected = None;
+        for entry in &auth_dot_json.chatgpt_entries {
+            if let Some(key) = ChatGptKey::from_tokens(&entry.tokens) {
+                selected = Some(key);
+                break;
+            }
+        }
+        if let Some(chatgpt_key) = selected {
+            return Ok(Some(Auth::ChatGpt {
+                handle: CodexAuth {
+                    storage: storage.clone(),
+                    auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
+                    chatgpt_key: Some(chatgpt_key),
+                    client,
+                },
+            }));
+        }
+    }
+
+    let tokens = auth_dot_json.tokens.clone();
+    let last_refresh = auth_dot_json.last_refresh;
+    if tokens.is_some() {
+        return Ok(Some(Auth::ChatGpt {
+            handle: CodexAuth {
+                storage: storage.clone(),
+                auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
+                    openai_api_key: None,
+                    chatgpt_entries: Vec::new(),
+                    api_keys: Vec::new(),
+                    tokens,
+                    last_refresh,
+                }))),
+                chatgpt_key: None,
+                client,
+            },
+        }));
+    }
+
+    Ok(None)
 }
 
+#[cfg(test)]
 async fn update_tokens(
     storage: &Arc<dyn AuthStorageBackend>,
     id_token: Option<String>,
@@ -735,17 +821,14 @@ mod tests {
         )
         .expect("failed to write auth file");
 
-        let CodexAuth {
-            api_key,
-            mode,
-            auth_dot_json,
-            storage: _,
-            ..
-        } = super::load_auth(codex_home.path(), false, AuthCredentialsStoreMode::File)
-            .unwrap()
-            .unwrap();
-        assert_eq!(None, api_key);
-        assert_eq!(AuthMode::ChatGPT, mode);
+        let CodexAuth { auth_dot_json, .. } =
+            match super::load_auth(codex_home.path(), false, AuthCredentialsStoreMode::File)
+                .unwrap()
+                .unwrap()
+            {
+                Auth::ChatGpt { handle } => handle,
+                Auth::ApiKey { .. } => panic!("expected ChatGPT auth"),
+            };
 
         let guard = auth_dot_json.lock().unwrap();
         let auth_dot_json = guard.as_ref().expect("AuthDotJson should exist");
