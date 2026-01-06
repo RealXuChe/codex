@@ -25,6 +25,7 @@ pub enum SlashCommand {
     Mention,
     Status,
     Mcp,
+    Login,
     Logout,
     Quit,
     Exit,
@@ -52,6 +53,7 @@ impl SlashCommand {
             SlashCommand::Model => "choose what model and reasoning effort to use",
             SlashCommand::Approvals => "choose what Codex can do without approval",
             SlashCommand::Mcp => "list configured MCP tools",
+            SlashCommand::Login => "manage Codex credentials",
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::TestApproval => "test approval request",
@@ -75,6 +77,7 @@ impl SlashCommand {
             | SlashCommand::Model
             | SlashCommand::Approvals
             | SlashCommand::Review
+            | SlashCommand::Login
             | SlashCommand::Logout => false,
             SlashCommand::Diff
             | SlashCommand::Mention

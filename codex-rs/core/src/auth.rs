@@ -1536,6 +1536,13 @@ impl AuthManager {
         self.inner.read().ok().and_then(|c| c.auth.clone())
     }
 
+    pub fn auth_load_error(&self) -> Option<String> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|cached| cached.auth_load_error.clone())
+    }
+
     pub fn active_credential_id(&self) -> Option<u32> {
         let guard = self.inner.read().ok()?;
         let auth_dot_json = guard.auth_dot_json.as_ref()?;

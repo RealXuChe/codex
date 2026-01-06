@@ -2,7 +2,6 @@ use crate::exec_command::relativize_to_home;
 use crate::text_formatting;
 use chrono::DateTime;
 use chrono::Local;
-use codex_app_server_protocol::AuthMode;
 use codex_core::AuthManager;
 use codex_core::auth::Auth;
 use codex_core::config::Config;

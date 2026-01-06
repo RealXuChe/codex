@@ -73,6 +73,7 @@ const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
 pub enum InputResult {
     Submitted(String),
     Command(SlashCommand),
+    CommandWithArgs { cmd: SlashCommand, args: String },
     None,
 }
 
@@ -1287,6 +1288,24 @@ impl ChatComposer {
                 };
                 if let Some(expanded) = expanded_prompt {
                     text = expanded;
+                }
+
+                if let Some((name, rest)) = parse_slash_name(&text) {
+                    let treat_as_plain_text = input_starts_with_space || name.contains('/');
+                    if !treat_as_plain_text
+                        && let Some((_n, cmd)) = built_in_slash_commands()
+                            .into_iter()
+                            .find(|(n, _)| *n == name)
+                        && matches!(cmd, SlashCommand::Login | SlashCommand::Logout)
+                    {
+                        return (
+                            InputResult::CommandWithArgs {
+                                cmd,
+                                args: rest.to_string(),
+                            },
+                            true,
+                        );
+                    }
                 }
                 if text.is_empty() && !has_attachments {
                     return (InputResult::None, true);
@@ -2831,6 +2850,9 @@ mod tests {
             InputResult::Command(cmd) => {
                 assert_eq!(cmd.command(), "init");
             }
+            InputResult::CommandWithArgs { .. } => {
+                panic!("expected Command result for '/init'")
+            }
             InputResult::Submitted(text) => {
                 panic!("expected command dispatch, but composer submitted literal text: {text}")
             }
@@ -2904,6 +2926,9 @@ mod tests {
             composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match result {
             InputResult::Command(cmd) => assert_eq!(cmd.command(), "diff"),
+            InputResult::CommandWithArgs { .. } => {
+                panic!("expected Command result for '/diff'")
+            }
             InputResult::Submitted(text) => {
                 panic!("expected command dispatch after Tab completion, got literal submit: {text}")
             }
@@ -2936,6 +2961,9 @@ mod tests {
         match result {
             InputResult::Command(cmd) => {
                 assert_eq!(cmd.command(), "mention");
+            }
+            InputResult::CommandWithArgs { .. } => {
+                panic!("expected Command result for '/mention'")
             }
             InputResult::Submitted(text) => {
                 panic!("expected command dispatch, but composer submitted literal text: {text}")
