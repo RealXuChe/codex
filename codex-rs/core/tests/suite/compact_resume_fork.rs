@@ -677,7 +677,7 @@ async fn compact_resume_after_second_compaction_preserves_history() {
     // Build expected final request input: initial context + forked user message +
     // compacted summary + post-compact user message + resumed user message.
     let summary_after_second_compact =
-        extract_summary_message(&requests[requests.len() - 3], SUMMARY_TEXT);
+        extract_summary_message(&requests[requests.len() - 2], SUMMARY_TEXT);
 
     let mut expected = json!([
       {

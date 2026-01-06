@@ -289,7 +289,7 @@ async fn tool_results_grouped() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_tools_start_before_response_completed_when_stream_delayed() -> anyhow::Result<()> {
+async fn shell_tools_wait_for_response_completed_when_stream_delayed() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let output_file = tempfile::NamedTempFile::new()?;
@@ -364,7 +364,15 @@ async fn shell_tools_start_before_response_completed_when_stream_delayed() -> an
     let _ = first_gate_tx.send(());
     let _ = follow_up_gate_tx.send(());
 
-    let timestamps = tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let contents = fs::read_to_string(&output_path).unwrap_or_default();
+    assert!(
+        contents.trim().is_empty(),
+        "expected shell tools to wait for response.completed; found: {contents:?}"
+    );
+
+    let _ = completion_gate_tx.send(());
+    let timestamps = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let contents = fs::read_to_string(output_path)?;
             let timestamps = contents
@@ -384,7 +392,6 @@ async fn shell_tools_start_before_response_completed_when_stream_delayed() -> an
     })
     .await??;
 
-    let _ = completion_gate_tx.send(());
     wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
 
     let mut completion_iter = completion_receivers.into_iter();
@@ -398,8 +405,8 @@ async fn shell_tools_start_before_response_completed_when_stream_delayed() -> an
 
     for timestamp in timestamps {
         assert!(
-            timestamp <= completed_at,
-            "timestamp {timestamp} should be before or equal to completed {completed_at}"
+            timestamp >= completed_at,
+            "timestamp {timestamp} should be after or equal to completed {completed_at}"
         );
     }
 

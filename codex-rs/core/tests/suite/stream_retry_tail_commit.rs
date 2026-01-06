@@ -58,7 +58,14 @@ async fn retry_drops_last_done_item_until_next_boundary() {
         requests.len()
     );
 
-    let assistant_texts = requests[1].message_input_texts("assistant");
+    let assistant_texts: Vec<String> = requests[1]
+        .inputs_of_type("message")
+        .into_iter()
+        .filter(|item| item.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+        .filter_map(|item| item.get("content").and_then(|v| v.as_array()).cloned())
+        .flatten()
+        .filter_map(|span| span.get("text").and_then(|v| v.as_str()).map(str::to_owned))
+        .collect();
     assert!(
         assistant_texts.iter().any(|text| text.contains("one")),
         "expected committed item to appear in retry request; assistant texts: {assistant_texts:?}"

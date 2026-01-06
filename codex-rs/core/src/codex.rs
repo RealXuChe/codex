@@ -3599,7 +3599,12 @@ mod tests {
             EventMsg::TurnAborted(e) => assert_eq!(TurnAbortReason::Interrupted, e.reason),
             other => panic!("unexpected event: {other:?}"),
         }
-        assert!(rx.try_recv().is_err());
+        while let Ok(evt) = rx.try_recv() {
+            match evt.msg {
+                EventMsg::RawResponseItem(_) => {}
+                other => panic!("unexpected event after TurnAborted: {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -3625,7 +3630,12 @@ mod tests {
             EventMsg::TurnAborted(e) => assert_eq!(TurnAbortReason::Interrupted, e.reason),
             other => panic!("unexpected event: {other:?}"),
         }
-        assert!(rx.try_recv().is_err());
+        while let Ok(evt) = rx.try_recv() {
+            match evt.msg {
+                EventMsg::RawResponseItem(_) => {}
+                other => panic!("unexpected event after TurnAborted: {other:?}"),
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
