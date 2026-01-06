@@ -70,6 +70,8 @@ pub(crate) enum KnownPlan {
 struct IdClaims {
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    sub: Option<String>,
     #[serde(rename = "https://api.openai.com/auth", default)]
     auth: Option<AuthClaims>,
 }
@@ -113,14 +115,14 @@ pub fn parse_id_token(id_token: &str) -> Result<IdTokenInfo, IdTokenInfoError> {
             raw_jwt: id_token.to_string(),
             chatgpt_plan_type: auth.chatgpt_plan_type,
             chatgpt_account_id: auth.chatgpt_account_id,
-            chatgpt_user_id: auth.chatgpt_user_id.or(auth.user_id),
+            chatgpt_user_id: auth.chatgpt_user_id.or(auth.user_id).or(claims.sub),
         }),
         None => Ok(IdTokenInfo {
             email: claims.email,
             raw_jwt: id_token.to_string(),
             chatgpt_plan_type: None,
             chatgpt_account_id: None,
-            chatgpt_user_id: None,
+            chatgpt_user_id: claims.sub,
         }),
     }
 }
