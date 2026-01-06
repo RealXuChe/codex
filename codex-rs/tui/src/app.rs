@@ -290,6 +290,7 @@ pub(crate) struct App {
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) chat_widget: ChatWidget,
     pub(crate) auth_manager: Arc<AuthManager>,
+    last_seen_auth_load_error: Option<String>,
     /// Config is stored here so we can recreate ChatWidgets as needed.
     pub(crate) config: Config,
     pub(crate) current_model: String,
@@ -321,6 +322,16 @@ pub(crate) struct App {
 }
 
 impl App {
+    fn take_auth_load_error_warning(&mut self) -> Option<String> {
+        let current = self.auth_manager.auth_load_error();
+        if current == self.last_seen_auth_load_error {
+            return None;
+        }
+
+        self.last_seen_auth_load_error = current.clone();
+        current
+    }
+
     async fn shutdown_current_conversation(&mut self) {
         if let Some(conversation_id) = self.chat_widget.conversation_id() {
             self.suppress_shutdown_complete = true;
@@ -427,6 +438,7 @@ impl App {
             app_event_tx,
             chat_widget,
             auth_manager: auth_manager.clone(),
+            last_seen_auth_load_error: None,
             config,
             current_model: model.clone(),
             active_profile,
@@ -451,6 +463,16 @@ impl App {
                     latest_version,
                     crate::update_action::get_update_action(),
                 ))),
+            )
+            .await?;
+        }
+
+        if let Some(err) = app.take_auth_load_error_warning() {
+            app.handle_event(
+                tui,
+                AppEvent::InsertHistoryCell(Box::new(history_cell::new_warning_event(format!(
+                    "Failed to load auth.json: {err}",
+                )))),
             )
             .await?;
         }
@@ -497,6 +519,12 @@ impl App {
                     self.chat_widget.handle_paste(pasted);
                 }
                 TuiEvent::Draw => {
+                    if let Some(err) = self.take_auth_load_error_warning() {
+                        self.chat_widget
+                            .add_to_history(history_cell::new_warning_event(format!(
+                                "Failed to load auth.json: {err}",
+                            )));
+                    }
                     self.chat_widget.maybe_post_pending_notification(tui);
                     if self
                         .chat_widget
@@ -1162,6 +1190,7 @@ mod tests {
             app_event_tx,
             chat_widget,
             auth_manager,
+            last_seen_auth_load_error: None,
             config,
             current_model,
             active_profile: None,
@@ -1201,6 +1230,7 @@ mod tests {
                 app_event_tx,
                 chat_widget,
                 auth_manager,
+                last_seen_auth_load_error: None,
                 config,
                 current_model,
                 active_profile: None,
