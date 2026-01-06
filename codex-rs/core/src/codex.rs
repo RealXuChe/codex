@@ -2388,6 +2388,7 @@ async fn run_turn(
     };
 
     let mut retries = 0;
+    let mut credential_switches = 0usize;
     loop {
         match try_run_turn(
             Arc::clone(&router),
@@ -2416,9 +2417,94 @@ async fn run_turn(
                 if let Some(rate_limits) = rate_limits {
                     sess.update_rate_limits(&turn_context, rate_limits).await;
                 }
+
+                let auth_manager = &sess.services.auth_manager;
+                let before_id = auth_manager.active_credential_id();
+                let max_switches = auth_manager.list_credentials().len().saturating_sub(1);
+
+                if credential_switches < max_switches
+                    && let Some(after_id) =
+                        auth_manager.record_active_credential_usage_limit_reached(e.to_string())
+                {
+                    credential_switches += 1;
+
+                    let entries = auth_manager.list_credentials();
+                    let before_label = before_id.and_then(|id| {
+                        entries.iter().find(|e| e.id == id).map(|e| {
+                            e.name
+                                .clone()
+                                .or(e.chatgpt_email.clone())
+                                .unwrap_or_else(|| format!("#{id}"))
+                        })
+                    });
+                    let after_label = entries.iter().find(|e| e.id == after_id).map(|e| {
+                        e.name
+                            .clone()
+                            .or(e.chatgpt_email.clone())
+                            .unwrap_or_else(|| format!("#{after_id}"))
+                    });
+
+                    let msg = match (before_id, before_label, after_label) {
+                        (Some(before_id), Some(before_label), Some(after_label)) => format!(
+                            "Credential #{before_id} ({before_label}) reached its limit; switching to #{after_id} ({after_label})."
+                        ),
+                        (Some(before_id), _, Some(after_label)) => format!(
+                            "Credential #{before_id} reached its limit; switching to #{after_id} ({after_label})."
+                        ),
+                        _ => format!(
+                            "Current credential reached its limit; switching to #{after_id}."
+                        ),
+                    };
+                    sess.notify_background_event(&turn_context, msg).await;
+                    continue;
+                }
+
                 return Err(CodexErr::UsageLimitReached(e));
             }
-            Err(CodexErr::UsageNotIncluded) => return Err(CodexErr::UsageNotIncluded),
+            Err(CodexErr::UsageNotIncluded) => {
+                let auth_manager = &sess.services.auth_manager;
+                let before_id = auth_manager.active_credential_id();
+                let max_switches = auth_manager.list_credentials().len().saturating_sub(1);
+
+                if credential_switches < max_switches
+                    && let Some(after_id) =
+                        auth_manager.record_active_credential_usage_not_included()
+                {
+                    credential_switches += 1;
+
+                    let entries = auth_manager.list_credentials();
+                    let before_label = before_id.and_then(|id| {
+                        entries.iter().find(|e| e.id == id).map(|e| {
+                            e.name
+                                .clone()
+                                .or(e.chatgpt_email.clone())
+                                .unwrap_or_else(|| format!("#{id}"))
+                        })
+                    });
+                    let after_label = entries.iter().find(|e| e.id == after_id).map(|e| {
+                        e.name
+                            .clone()
+                            .or(e.chatgpt_email.clone())
+                            .unwrap_or_else(|| format!("#{after_id}"))
+                    });
+
+                    let msg = match (before_id, before_label, after_label) {
+                        (Some(before_id), Some(before_label), Some(after_label)) => format!(
+                            "Credential #{before_id} ({before_label}) does not include Codex usage; switching to #{after_id} ({after_label})."
+                        ),
+                        (Some(before_id), _, Some(after_label)) => format!(
+                            "Credential #{before_id} does not include Codex usage; switching to #{after_id} ({after_label})."
+                        ),
+                        _ => format!(
+                            "Current credential does not include Codex usage; switching to #{after_id}."
+                        ),
+                    };
+                    sess.notify_background_event(&turn_context, msg).await;
+                    continue;
+                }
+
+                return Err(CodexErr::UsageNotIncluded);
+            }
             Err(e @ CodexErr::QuotaExceeded) => return Err(e),
             Err(e @ CodexErr::InvalidImageRequest()) => return Err(e),
             Err(e @ CodexErr::InvalidRequest(_)) => return Err(e),
