@@ -7,6 +7,8 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::Write;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -120,15 +122,38 @@ impl AuthStorageBackend for FileAuthStorage {
             std::fs::create_dir_all(parent)?;
         }
         let json_data = serde_json::to_string_pretty(auth_dot_json)?;
+
+        let pid = std::process::id();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_file = auth_file.with_file_name(format!(".auth.json.tmp.{pid}.{nanos}"));
+
         let mut options = OpenOptions::new();
-        options.truncate(true).write(true).create(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             options.mode(0o600);
         }
-        let mut file = options.open(auth_file)?;
+        let mut file = options.open(&tmp_file)?;
         file.write_all(json_data.as_bytes())?;
-        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+
+        if let Err(err) = std::fs::rename(&tmp_file, &auth_file) {
+            let _ = std::fs::remove_file(&tmp_file);
+            return Err(err);
+        }
+
+        #[cfg(unix)]
+        {
+            if let Some(parent) = auth_file.parent() {
+                let dir = File::open(parent)?;
+                dir.sync_all()?;
+            }
+        }
+
         Ok(())
     }
 
