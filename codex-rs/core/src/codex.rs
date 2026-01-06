@@ -2379,17 +2379,23 @@ async fn run_turn(
         .get_model_family()
         .supports_parallel_tool_calls;
 
-    let prompt = Prompt {
-        input,
-        tools: router.specs(),
-        parallel_tool_calls: model_supports_parallel && sess.enabled(Feature::ParallelToolCalls),
-        base_instructions_override: turn_context.base_instructions.clone(),
-        output_schema: turn_context.final_output_json_schema.clone(),
-    };
-
     let mut retries = 0;
     let mut credential_switches = 0usize;
     loop {
+        let attempt_input = if retries == 0 {
+            input.clone()
+        } else {
+            sess.clone_history().await.get_history_for_prompt()
+        };
+        let prompt = Prompt {
+            input: attempt_input,
+            tools: router.specs(),
+            parallel_tool_calls: model_supports_parallel
+                && sess.enabled(Feature::ParallelToolCalls),
+            base_instructions_override: turn_context.base_instructions.clone(),
+            output_schema: turn_context.final_output_json_schema.clone(),
+        };
+
         match try_run_turn(
             Arc::clone(&router),
             Arc::clone(&sess),
@@ -2510,35 +2516,42 @@ async fn run_turn(
             Err(e @ CodexErr::InvalidRequest(_)) => return Err(e),
             Err(e @ CodexErr::RefreshTokenFailed(_)) => return Err(e),
             Err(e) => {
-                // Use the configured provider-specific stream retry budget.
-                let max_retries = turn_context.client.get_provider().stream_max_retries();
-                if retries < max_retries {
-                    retries += 1;
-                    let delay = match e {
-                        CodexErr::Stream(_, Some(delay)) => delay,
-                        _ => backoff(retries),
-                    };
-                    warn!(
-                        "stream disconnected - retrying turn ({retries}/{max_retries} in {delay:?})...",
-                    );
-
-                    // Surface retry information to any UI/front‑end so the
-                    // user understands what is happening instead of staring
-                    // at a seemingly frozen screen.
-                    sess.notify_stream_error(
-                        &turn_context,
-                        format!("Reconnecting... {retries}/{max_retries}"),
-                        e,
-                    )
-                    .await;
-
-                    tokio::time::sleep(delay).await;
-                } else {
+                if !is_stream_retryable(&e) {
                     return Err(e);
                 }
+
+                // For stream-level failures, retry indefinitely. This avoids treating transient
+                // disconnects as a hard failure. Backoff is bounded to a fixed maximum to avoid
+                // "hung" UX.
+                retries += 1;
+                let delay = match e {
+                    CodexErr::Stream(_, Some(delay)) => delay,
+                    _ => backoff(retries),
+                }
+                .min(std::time::Duration::from_secs(5));
+                warn!("stream disconnected - retrying turn ({retries} in {delay:?})...");
+
+                // Surface retry information to any UI/front‑end so the user understands what is
+                // happening instead of staring at a seemingly frozen screen.
+                sess.notify_stream_error(&turn_context, format!("Reconnecting... {retries}"), e)
+                    .await;
+
+                tokio::time::sleep(delay)
+                    .or_cancel(&cancellation_token)
+                    .await?;
             }
         }
     }
+}
+
+fn is_stream_retryable(err: &CodexErr) -> bool {
+    matches!(
+        err,
+        CodexErr::Stream(_, _)
+            | CodexErr::Timeout
+            | CodexErr::ConnectionFailed(_)
+            | CodexErr::ResponseStreamFailed(_)
+    )
 }
 
 #[derive(Debug)]
@@ -2622,6 +2635,9 @@ async fn try_run_turn(
     );
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
+    let mut committed_tool_calls = Vec::new();
+    let mut pending_done_item: Option<(Vec<ResponseItem>, Vec<crate::tools::router::ToolCall>)> =
+        None;
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
@@ -2643,11 +2659,18 @@ async fn try_run_turn(
             .await
         {
             Ok(event) => event,
-            Err(codex_async_utils::CancelErr::Cancelled) => break Err(CodexErr::TurnAborted),
+            Err(codex_async_utils::CancelErr::Cancelled) => {
+                if let Some((items, tool_calls)) = pending_done_item.take() {
+                    sess.record_conversation_items(&turn_context, &items).await;
+                    committed_tool_calls.extend(tool_calls);
+                }
+                break Err(CodexErr::TurnAborted);
+            }
         };
 
         let event = match event {
-            Some(res) => res?,
+            Some(Ok(res)) => res,
+            Some(Err(err)) => break Err(err),
             None => {
                 break Err(CodexErr::Stream(
                     "stream closed before response.completed".into(),
@@ -2667,22 +2690,36 @@ async fn try_run_turn(
                 let mut ctx = HandleOutputCtx {
                     sess: sess.clone(),
                     turn_context: turn_context.clone(),
-                    tool_runtime: tool_runtime.clone(),
-                    cancellation_token: cancellation_token.child_token(),
                 };
 
-                let output_result = handle_output_item_done(&mut ctx, item, previously_active_item)
-                    .instrument(handle_responses)
-                    .await?;
-                if let Some(tool_future) = output_result.tool_future {
-                    in_flight.push_back(tool_future);
+                let output_result =
+                    match handle_output_item_done(&mut ctx, item, previously_active_item)
+                        .instrument(handle_responses)
+                        .await
+                    {
+                        Ok(output_result) => output_result,
+                        Err(err) => break Err(err),
+                    };
+
+                // Guard against unexpected ordering: only one "done but not yet committed" item
+                // should exist at a time. If we ever see another done item without a corresponding
+                // next-item boundary, commit the previous one to avoid losing progress.
+                if let Some((items, tool_calls)) = pending_done_item.take() {
+                    sess.record_conversation_items(&turn_context, &items).await;
+                    committed_tool_calls.extend(tool_calls);
                 }
+
+                pending_done_item = Some((output_result.commit_items, output_result.tool_calls));
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message = Some(agent_message);
                 }
                 needs_follow_up |= output_result.needs_follow_up;
             }
             ResponseEvent::OutputItemAdded(item) => {
+                if let Some((items, tool_calls)) = pending_done_item.take() {
+                    sess.record_conversation_items(&turn_context, &items).await;
+                    committed_tool_calls.extend(tool_calls);
+                }
                 if let Some(turn_item) = handle_non_tool_response_item(&item).await {
                     let tracked_item = turn_item.clone();
                     sess.emit_turn_item_started(&turn_context, &turn_item).await;
@@ -2708,6 +2745,10 @@ async fn try_run_turn(
             } => {
                 sess.update_token_usage_info(&turn_context, token_usage.as_ref())
                     .await;
+                if let Some((items, tool_calls)) = pending_done_item.take() {
+                    sess.record_conversation_items(&turn_context, &items).await;
+                    committed_tool_calls.extend(tool_calls);
+                }
                 should_emit_turn_diff = true;
 
                 break Ok(TurnRunResult {
@@ -2782,7 +2823,18 @@ async fn try_run_turn(
         }
     };
 
-    drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+    let should_execute_tools = !matches!(&outcome, Err(CodexErr::TurnAborted));
+    if should_execute_tools {
+        for call in committed_tool_calls {
+            let cancellation_token = cancellation_token.child_token();
+            in_flight.push_back(Box::pin(
+                tool_runtime
+                    .clone()
+                    .handle_tool_call(call, cancellation_token),
+            ));
+        }
+        drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+    }
 
     if should_emit_turn_diff {
         let unified_diff = {
