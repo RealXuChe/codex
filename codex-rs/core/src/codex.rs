@@ -1587,6 +1587,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::Interrupt => {
                 handlers::interrupt(&sess).await;
             }
+            Op::Continue => {
+                handlers::continue_turn(&sess, sub.id.clone(), &mut previous_context).await;
+            }
             Op::OverrideTurnContext {
                 cwd,
                 approval_policy,
@@ -1713,6 +1716,31 @@ mod handlers {
 
     pub async fn interrupt(sess: &Arc<Session>) {
         sess.interrupt_task().await;
+    }
+
+    pub async fn continue_turn(
+        sess: &Arc<Session>,
+        sub_id: String,
+        previous_context: &mut Option<Arc<TurnContext>>,
+    ) {
+        let Ok(current_context) = sess
+            .new_turn_with_sub_id(sub_id, SessionSettingsUpdate::default())
+            .await
+        else {
+            // new_turn_with_sub_id already emits the error event.
+            return;
+        };
+
+        if let Some(env_item) =
+            sess.build_environment_update_item(previous_context.as_ref(), &current_context)
+        {
+            sess.record_conversation_items(&current_context, std::slice::from_ref(&env_item))
+                .await;
+        }
+
+        sess.spawn_task(Arc::clone(&current_context), Vec::new(), RegularTask)
+            .await;
+        *previous_context = Some(current_context);
     }
 
     pub async fn override_turn_context(
@@ -2209,10 +2237,6 @@ pub(crate) async fn run_task(
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
 ) -> Option<String> {
-    if input.is_empty() {
-        return None;
-    }
-
     let auto_compact_limit = turn_context
         .client
         .get_model_family()
@@ -2243,10 +2267,12 @@ pub(crate) async fn run_task(
             .await;
     }
 
-    let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
-    let response_item: ResponseItem = initial_input_for_turn.clone().into();
-    sess.record_response_item_and_emit_turn_item(turn_context.as_ref(), response_item)
-        .await;
+    if !input.is_empty() {
+        let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+        let response_item: ResponseItem = initial_input_for_turn.clone().into();
+        sess.record_response_item_and_emit_turn_item(turn_context.as_ref(), response_item)
+            .await;
+    }
 
     if !skill_items.is_empty() {
         sess.record_conversation_items(&turn_context, &skill_items)
