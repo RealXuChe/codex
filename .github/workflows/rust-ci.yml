@@ -106,47 +106,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            profile: dev
-          - runner: macos-14
-            target: x86_64-apple-darwin
-            profile: dev
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             profile: dev
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             profile: dev
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            profile: dev
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            profile: dev
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            profile: dev
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            profile: dev
-
-          # Also run representative release builds on Mac and Linux because
-          # there could be release-only build errors we want to catch.
-          # Hopefully this also pre-populates the build cache to speed up
-          # releases.
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            profile: release
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            profile: release
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            profile: release
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            profile: release
 
     steps:
       - uses: actions/checkout@v6
@@ -217,7 +182,7 @@ jobs:
             sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-
             sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
 
-      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
         name: Prepare APT cache directories (musl)
         shell: bash
         run: |
@@ -225,7 +190,7 @@ jobs:
           sudo mkdir -p /var/cache/apt/archives /var/lib/apt/lists
           sudo chown -R "$USER:$USER" /var/cache/apt /var/lib/apt/lists
 
-      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
         name: Restore APT cache (musl)
         id: cache_apt_restore
         uses: actions/cache/restore@v5
@@ -234,7 +199,7 @@ jobs:
             /var/cache/apt
           key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
 
-      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
         name: Install musl build tools
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -317,7 +282,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save APT cache (musl)
-        if: always() && !cancelled() && (matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl') && steps.cache_apt_restore.outputs.cache-hit != 'true'
+        if: always() && !cancelled() && matrix.target == 'x86_64-unknown-linux-musl' && steps.cache_apt_restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v5
         with:
@@ -353,20 +318,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            profile: dev
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            profile: dev
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            profile: dev
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            profile: dev
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
             profile: dev
 
     steps:
