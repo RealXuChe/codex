@@ -529,7 +529,11 @@ pub(crate) async fn persist_tokens_async(
         )?;
 
         if let Some(api_key) = api_key {
-            codex_core::auth::login_with_api_key(&codex_home, &api_key, auth_credentials_store_mode)?;
+            codex_core::auth::login_with_api_key(
+                &codex_home,
+                &api_key,
+                auth_credentials_store_mode,
+            )?;
         }
 
         Ok(())

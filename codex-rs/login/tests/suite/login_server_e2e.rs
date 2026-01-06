@@ -156,8 +156,14 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     let json: serde_json::Value = serde_json::from_str(&data)?;
     assert!(json["OPENAI_API_KEY"].is_null());
     assert_eq!(json["api_keys"][0]["api_key"], "access-123");
-    assert_eq!(json["chatgpt_entries"][0]["tokens"]["access_token"], "access-123");
-    assert_eq!(json["chatgpt_entries"][0]["tokens"]["refresh_token"], "refresh-123");
+    assert_eq!(
+        json["chatgpt_entries"][0]["tokens"]["access_token"],
+        "access-123"
+    );
+    assert_eq!(
+        json["chatgpt_entries"][0]["tokens"]["refresh_token"],
+        "refresh-123"
+    );
     assert_eq!(
         json["chatgpt_entries"][0]["tokens"]["account_id"],
         chatgpt_account_id
