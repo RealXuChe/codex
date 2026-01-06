@@ -54,10 +54,14 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
     assert_eq!(access, "new-access-token");
 
     let stored = ctx.load_auth()?;
-    let tokens = stored.tokens.as_ref().context("tokens should exist")?;
+    let entry = stored
+        .chatgpt_entries
+        .first()
+        .context("chatgpt entry should exist")?;
+    let tokens = &entry.tokens;
     assert_eq!(tokens.access_token, "new-access-token");
     assert_eq!(tokens.refresh_token, "new-refresh-token");
-    let refreshed_at = stored
+    let refreshed_at = entry
         .last_refresh
         .as_ref()
         .context("last_refresh should be recorded")?;
