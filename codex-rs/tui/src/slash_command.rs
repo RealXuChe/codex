@@ -19,6 +19,7 @@ pub enum SlashCommand {
     Review,
     New,
     Resume,
+    Continue,
     Init,
     Compact,
     // Undo,
@@ -46,6 +47,7 @@ impl SlashCommand {
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Resume => "resume a saved chat",
+            SlashCommand::Continue => "start a new turn without adding a user message",
             // SlashCommand::Undo => "ask Codex to undo a turn",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
@@ -75,6 +77,7 @@ impl SlashCommand {
         match self {
             SlashCommand::New
             | SlashCommand::Resume
+            | SlashCommand::Continue
             | SlashCommand::Init
             | SlashCommand::Compact
             // | SlashCommand::Undo
