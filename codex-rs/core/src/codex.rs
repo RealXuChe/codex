@@ -440,6 +440,8 @@ pub(crate) struct SessionSettingsUpdate {
 }
 
 impl Session {
+    const USER_INTERRUPT_MARKER: &str = "<event user_interrupt=\"true\"/>";
+
     /// Don't expand the number of mutated arguments on config. We are in the process of getting rid of it.
     fn build_per_turn_config(session_configuration: &SessionConfiguration) -> Config {
         // todo(aibrahim): store this state somewhere else so we don't need to mut config
@@ -1390,6 +1392,18 @@ impl Session {
             self.emit_turn_item_started(turn_context, &item).await;
             self.emit_turn_item_completed(turn_context, item).await;
         }
+    }
+
+    pub(crate) async fn record_user_interrupt_marker(&self, turn_context: &TurnContext) {
+        let item = ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: Self::USER_INTERRUPT_MARKER.to_string(),
+            }],
+        };
+
+        self.record_conversation_items(turn_context, &[item]).await;
     }
 
     pub(crate) async fn notify_background_event(
