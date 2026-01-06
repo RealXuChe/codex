@@ -110,6 +110,11 @@ impl ToolHandler for ApplyPatchHandler {
                             cwd: apply.action.cwd.clone(),
                             timeout_ms: None,
                             user_explicitly_approved: apply.user_explicitly_approved_this_action,
+                            // NOTE: arg0 dispatch checks argv0 first; and on Linux this can
+                            // actually be the `codex-linux-sandbox` binary. In that case it runs
+                            // the sandbox main and never reaches the argv1
+                            // `--codex-run-as-apply-patch` branch. Ideal: separate
+                            // "codex exe" from the sandbox exe (or default to current_exe()).
                             codex_exe: turn.codex_linux_sandbox_exe.clone(),
                         };
 
@@ -201,6 +206,11 @@ pub(crate) async fn intercept_apply_patch(
                         cwd: apply.action.cwd.clone(),
                         timeout_ms,
                         user_explicitly_approved: apply.user_explicitly_approved_this_action,
+                        // NOTE: arg0 dispatch checks argv0 first; and on Linux this can
+                        // actually be the `codex-linux-sandbox` binary. In that case it runs
+                        // the sandbox main and never reaches the argv1
+                        // `--codex-run-as-apply-patch` branch. Ideal: separate
+                        // "codex exe" from the sandbox exe (or default to current_exe()).
                         codex_exe: turn.codex_linux_sandbox_exe.clone(),
                     };
 
