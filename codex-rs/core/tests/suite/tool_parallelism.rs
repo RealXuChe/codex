@@ -365,7 +365,7 @@ async fn shell_tools_wait_for_response_completed_when_stream_delayed() -> anyhow
     let _ = follow_up_gate_tx.send(());
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let contents = fs::read_to_string(&output_path).unwrap_or_default();
+    let contents = fs::read_to_string(output_path).unwrap_or_default();
     assert!(
         contents.trim().is_empty(),
         "expected shell tools to wait for response.completed; found: {contents:?}"
