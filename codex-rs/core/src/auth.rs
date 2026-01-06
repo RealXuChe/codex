@@ -265,17 +265,18 @@ impl CodexAuth {
             .get_current_auth_json()
             .ok_or(std::io::Error::other("Token data is not available."))?;
 
-        let (tokens, last_refresh) = if let Some(entry) = self.get_current_chatgpt_entry(&auth_dot_json) {
-            (entry.tokens.clone(), entry.last_refresh)
-        } else {
-            (
-                auth_dot_json
-                    .tokens
-                    .clone()
-                    .ok_or(std::io::Error::other("Token data is not available."))?,
-                auth_dot_json.last_refresh,
-            )
-        };
+        let (tokens, last_refresh) =
+            if let Some(entry) = self.get_current_chatgpt_entry(&auth_dot_json) {
+                (entry.tokens.clone(), entry.last_refresh)
+            } else {
+                (
+                    auth_dot_json
+                        .tokens
+                        .clone()
+                        .ok_or(std::io::Error::other("Token data is not available."))?,
+                    auth_dot_json.last_refresh,
+                )
+            };
 
         let Some(last_refresh) = last_refresh else {
             return Err(std::io::Error::other("Token data is not available."));
@@ -1114,12 +1115,12 @@ mod tests {
 
         let CodexAuth { auth_dot_json, .. } =
             match super::load_auth(codex_home.path(), false, AuthCredentialsStoreMode::File)
-            .unwrap()
-            .unwrap()
-        {
-            Auth::ChatGpt { handle } => handle,
-            Auth::ApiKey { .. } => panic!("expected ChatGPT auth"),
-        };
+                .unwrap()
+                .unwrap()
+            {
+                Auth::ChatGpt { handle } => handle,
+                Auth::ApiKey { .. } => panic!("expected ChatGPT auth"),
+            };
 
         let guard = auth_dot_json.lock().unwrap();
         let auth_dot_json = guard.as_ref().expect("AuthDotJson should exist");
