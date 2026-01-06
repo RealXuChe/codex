@@ -645,8 +645,7 @@ mod tests {
 
     #[test]
     fn build_available_models_picks_default_after_hiding_hidden_models() {
-        let auth_manager =
-            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+        let auth_manager = AuthManager::from_api_key_for_testing("Test API Key");
         let provider = provider_for("http://example.test".to_string());
         let mut manager = ModelsManager::with_provider(auth_manager, provider);
         manager.local_models = Vec::new();

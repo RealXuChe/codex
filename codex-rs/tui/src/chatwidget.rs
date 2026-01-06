@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use codex_app_server_protocol::AuthMode;
 use codex_backend_client::Client as BackendClient;
 use codex_core::config::Config;
 use codex_core::config::ConstraintResult;
@@ -1639,6 +1638,9 @@ impl ChatWidget {
                     InputResult::Command(cmd) => {
                         self.dispatch_command(cmd);
                     }
+                    InputResult::CommandWithArgs { cmd, args } => {
+                        self.dispatch_command_with_args(cmd, args);
+                    }
                     InputResult::None => {}
                 }
             }
@@ -1737,15 +1739,27 @@ impl ChatWidget {
             SlashCommand::Experimental => {
                 self.open_experimental_popup();
             }
+            SlashCommand::Login => {
+                self.add_info_message(
+                    "Usage: /login activate <id> or /login name <id> <name>.".to_string(),
+                    Some("To add a new credential, run `codex login` in another terminal, then run /status.".to_string()),
+                );
+            }
             SlashCommand::Quit | SlashCommand::Exit => {
                 self.request_exit();
             }
             SlashCommand::Logout => {
-                if let Err(e) = codex_core::auth::logout(
-                    &self.config.codex_home,
-                    self.config.cli_auth_credentials_store_mode,
-                ) {
-                    tracing::error!("failed to logout: {e}");
+                if self.auth_manager.list_credentials().len() > 1 {
+                    self.add_to_history(history_cell::new_error_event(
+                        "Multiple credentials are configured. Use /logout <id> or /logout all."
+                            .to_string(),
+                    ));
+                    self.request_redraw();
+                    return;
+                }
+
+                if let Err(err) = self.auth_manager.logout() {
+                    tracing::error!("failed to logout: {err}");
                 }
                 self.request_exit();
             }
@@ -1831,6 +1845,161 @@ impl ChatWidget {
                         grant_root: Some(PathBuf::from("/tmp")),
                     }),
                 }));
+            }
+        }
+    }
+
+    fn dispatch_command_with_args(&mut self, cmd: SlashCommand, args: String) {
+        if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
+            let message = format!(
+                "'/{}' is disabled while a task is in progress.",
+                cmd.command()
+            );
+            self.add_to_history(history_cell::new_error_event(message));
+            self.request_redraw();
+            return;
+        }
+
+        match cmd {
+            SlashCommand::Login => {
+                self.dispatch_login_args(args);
+            }
+            SlashCommand::Logout => {
+                self.dispatch_logout_args(args);
+            }
+            _ => {
+                // This should be unreachable because the composer only emits args for
+                // commands that support subcommands.
+                self.dispatch_command(cmd);
+            }
+        }
+    }
+
+    fn dispatch_login_args(&mut self, args: String) {
+        let args = args.trim();
+        if args.is_empty() {
+            self.dispatch_command(SlashCommand::Login);
+            return;
+        }
+
+        let mut parts = args.split_whitespace();
+        let Some(subcmd) = parts.next() else {
+            self.dispatch_command(SlashCommand::Login);
+            return;
+        };
+
+        match subcmd {
+            "activate" => {
+                let Some(id_str) = parts.next() else {
+                    self.add_to_history(history_cell::new_error_event(
+                        "Usage: /login activate <id>".to_string(),
+                    ));
+                    self.request_redraw();
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    self.add_to_history(history_cell::new_error_event(format!(
+                        "Invalid credential id: {id_str}"
+                    )));
+                    self.request_redraw();
+                    return;
+                };
+                if let Err(err) = self.auth_manager.activate_credential_by_id(id) {
+                    self.add_to_history(history_cell::new_error_event(err.to_string()));
+                    self.request_redraw();
+                    return;
+                }
+                self.add_to_history(history_cell::new_info_event(
+                    format!("Active credential set to #{id}."),
+                    None,
+                ));
+                self.request_redraw();
+            }
+            "name" => {
+                let Some(id_str) = parts.next() else {
+                    self.add_to_history(history_cell::new_error_event(
+                        "Usage: /login name <id> <name>".to_string(),
+                    ));
+                    self.request_redraw();
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    self.add_to_history(history_cell::new_error_event(format!(
+                        "Invalid credential id: {id_str}"
+                    )));
+                    self.request_redraw();
+                    return;
+                };
+                let name = parts.collect::<Vec<_>>().join(" ");
+                let name = name.trim();
+                if name.is_empty() {
+                    self.add_to_history(history_cell::new_error_event(
+                        "Usage: /login name <id> <name>".to_string(),
+                    ));
+                    self.request_redraw();
+                    return;
+                }
+                if let Err(err) = self
+                    .auth_manager
+                    .rename_credential_by_id(id, Some(name.to_string()))
+                {
+                    self.add_to_history(history_cell::new_error_event(err.to_string()));
+                    self.request_redraw();
+                    return;
+                }
+                self.add_to_history(history_cell::new_info_event(
+                    format!("Renamed credential #{id} to \"{name}\"."),
+                    None,
+                ));
+                self.request_redraw();
+            }
+            _ => {
+                self.add_to_history(history_cell::new_error_event(format!(
+                    "Unknown /login subcommand: {subcmd}"
+                )));
+                self.request_redraw();
+            }
+        }
+    }
+
+    fn dispatch_logout_args(&mut self, args: String) {
+        let args = args.trim();
+        if args.is_empty() {
+            self.dispatch_command(SlashCommand::Logout);
+            return;
+        }
+
+        if args == "all" {
+            if let Err(err) = self.auth_manager.logout_all_credentials() {
+                tracing::error!("failed to logout: {err}");
+            }
+            self.request_exit();
+            return;
+        }
+
+        let Ok(id) = args.parse::<u32>() else {
+            self.add_to_history(history_cell::new_error_event(format!(
+                "Invalid credential id: {args}"
+            )));
+            self.request_redraw();
+            return;
+        };
+
+        match self.auth_manager.logout_credential_by_id(id) {
+            Ok(true) => {
+                self.add_to_history(history_cell::new_info_event(
+                    format!("Logged out credential #{id}."),
+                    None,
+                ));
+                self.request_redraw();
+            }
+            Ok(false) => {
+                self.add_to_history(history_cell::new_error_event("Not logged in.".to_string()));
+                self.request_redraw();
+            }
+            Err(err) => {
+                self.add_to_history(history_cell::new_error_event(err.to_string()));
+                self.request_redraw();
             }
         }
     }
@@ -2256,6 +2425,47 @@ impl ChatWidget {
             Local::now(),
             &self.model,
         ));
+
+        let credentials = self.auth_manager.list_credentials();
+        if credentials.len() <= 1 {
+            return;
+        }
+
+        let base_url = self.config.chatgpt_base_url.clone();
+        let auth_manager = self.auth_manager.clone();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let mut items: Vec<(
+                codex_core::auth::CredentialListEntry,
+                Option<crate::status::RateLimitSnapshotDisplay>,
+                Option<String>,
+            )> = Vec::with_capacity(credentials.len());
+
+            for entry in credentials {
+                let unusable_message = auth_manager.credential_unusable_message_by_id(entry.id);
+                let snapshot = if entry.mode == codex_app_server_protocol::AuthMode::ChatGPT {
+                    match auth_manager.auth_for_credential_by_id(entry.id) {
+                        Some(codex_core::auth::Auth::ChatGpt { handle }) => {
+                            fetch_rate_limits(base_url.clone(), handle)
+                                .await
+                                .map(|snapshot| {
+                                    crate::status::rate_limit_snapshot_display(
+                                        &snapshot,
+                                        Local::now(),
+                                    )
+                                })
+                        }
+                        Some(codex_core::auth::Auth::ApiKey { .. }) | None => None,
+                    }
+                } else {
+                    None
+                };
+                items.push((entry, snapshot, unusable_message));
+            }
+
+            let cell = crate::status::new_credentials_list_output(items, Local::now());
+            app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(cell)));
+        });
     }
 
     pub(crate) fn add_ps_output(&mut self) {
@@ -2276,21 +2486,21 @@ impl ChatWidget {
     fn prefetch_rate_limits(&mut self) {
         self.stop_rate_limit_poller();
 
-        let Some(auth) = self.auth_manager.auth() else {
-            return;
-        };
-        if auth.mode != AuthMode::ChatGPT {
+        if self.auth_manager.auth().is_none() {
             return;
         }
 
         let base_url = self.config.chatgpt_base_url.clone();
         let app_event_tx = self.app_event_tx.clone();
+        let auth_manager = self.auth_manager.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
 
             loop {
-                if let Some(snapshot) = fetch_rate_limits(base_url.clone(), auth.clone()).await {
+                if let Some(codex_core::auth::Auth::ChatGpt { handle }) = auth_manager.auth()
+                    && let Some(snapshot) = fetch_rate_limits(base_url.clone(), handle).await
+                {
                     app_event_tx.send(AppEvent::RateLimitSnapshotFetched(snapshot));
                 }
                 interval.tick().await;

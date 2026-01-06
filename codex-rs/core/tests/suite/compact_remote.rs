@@ -4,6 +4,7 @@ use std::fs;
 
 use anyhow::Result;
 use codex_core::CodexAuth;
+use codex_core::auth::Auth;
 use codex_core::features::Feature;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
@@ -28,7 +29,9 @@ async fn remote_compact_replaces_history_for_followups() -> Result<()> {
 
     let harness = TestCodexHarness::with_builder(
         test_codex()
-            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_auth(Auth::ChatGpt {
+                handle: CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            })
             .with_config(|config| {
                 config.features.enable(Feature::RemoteCompaction);
             }),
@@ -143,7 +146,9 @@ async fn remote_compact_runs_automatically() -> Result<()> {
 
     let harness = TestCodexHarness::with_builder(
         test_codex()
-            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_auth(Auth::ChatGpt {
+                handle: CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            })
             .with_config(|config| {
                 config.features.enable(Feature::RemoteCompaction);
             }),
@@ -215,7 +220,9 @@ async fn remote_compact_persists_replacement_history_in_rollout() -> Result<()> 
 
     let harness = TestCodexHarness::with_builder(
         test_codex()
-            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_auth(Auth::ChatGpt {
+                handle: CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            })
             .with_config(|config| {
                 config.features.enable(Feature::RemoteCompaction);
             }),

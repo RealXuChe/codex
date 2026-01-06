@@ -1,7 +1,8 @@
-use codex_core::CodexAuth;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
 use codex_core::NewConversation;
+use codex_core::auth::ApiKeyAuth;
+use codex_core::auth::Auth;
 use codex_core::built_in_model_providers;
 use codex_core::parse_turn_item;
 use codex_core::protocol::EventMsg;
@@ -56,7 +57,9 @@ async fn fork_conversation_twice_drops_to_first_message() {
     let config_for_fork = config.clone();
 
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let NewConversation {

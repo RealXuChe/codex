@@ -44,6 +44,7 @@ fn start_mock_issuer(chatgpt_account_id: &str) -> (SocketAddr, thread::JoinHandl
                     "https://api.openai.com/auth": {
                         "chatgpt_plan_type": "pro",
                         "chatgpt_account_id": chatgpt_account_id,
+                        "chatgpt_user_id": "user-123",
                     }
                 });
                 let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
@@ -153,13 +154,14 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     let auth_path = codex_home.join("auth.json");
     let data = std::fs::read_to_string(&auth_path)?;
     let json: serde_json::Value = serde_json::from_str(&data)?;
-    // The following assert is here because of the old oauth flow that exchanges tokens for an
-    // API key. See obtain_api_key in server.rs for details. Once we remove this old mechanism
-    // from the code, this test should be updated to expect that the API key is no longer present.
-    assert_eq!(json["OPENAI_API_KEY"], "access-123");
-    assert_eq!(json["tokens"]["access_token"], "access-123");
-    assert_eq!(json["tokens"]["refresh_token"], "refresh-123");
-    assert_eq!(json["tokens"]["account_id"], chatgpt_account_id);
+    assert!(json["OPENAI_API_KEY"].is_null());
+    assert_eq!(json["api_keys"][0]["api_key"], "access-123");
+    assert_eq!(json["chatgpt_entries"][0]["tokens"]["access_token"], "access-123");
+    assert_eq!(json["chatgpt_entries"][0]["tokens"]["refresh_token"], "refresh-123");
+    assert_eq!(
+        json["chatgpt_entries"][0]["tokens"]["account_id"],
+        chatgpt_account_id
+    );
 
     // Stop mock issuer
     drop(issuer_handle);

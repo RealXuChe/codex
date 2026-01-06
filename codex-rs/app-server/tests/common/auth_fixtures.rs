@@ -90,6 +90,7 @@ impl ChatGptIdTokenClaims {
 pub fn encode_id_token(claims: &ChatGptIdTokenClaims) -> Result<String> {
     let header = json!({ "alg": "none", "typ": "JWT" });
     let mut payload = serde_json::Map::new();
+    payload.insert("sub".to_string(), json!("user-123"));
     if let Some(email) = &claims.email {
         payload.insert("email".to_string(), json!(email));
     }
@@ -120,13 +121,17 @@ pub fn write_chatgpt_auth(
         id_token,
         access_token: fixture.access_token,
         refresh_token: fixture.refresh_token,
-        account_id: fixture.account_id,
+        account_id: fixture
+            .account_id
+            .or_else(|| Some("account-id".to_string())),
     };
 
     let last_refresh = fixture.last_refresh.unwrap_or_else(|| Some(Utc::now()));
 
     let auth = AuthDotJson {
         openai_api_key: None,
+        chatgpt_entries: Vec::new(),
+        api_keys: Vec::new(),
         tokens: Some(tokens),
         last_refresh,
     };

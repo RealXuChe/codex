@@ -4,10 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use codex_core::CodexAuth;
 use codex_core::CodexConversation;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
+use codex_core::auth::ApiKeyAuth;
+use codex_core::auth::Auth;
 use codex_core::built_in_model_providers;
 use codex_core::config::Config;
 use codex_core::features::Feature;
@@ -52,7 +53,7 @@ pub enum ShellModelOutput {
 
 pub struct TestCodexBuilder {
     config_mutators: Vec<Box<ConfigMutator>>,
-    auth: CodexAuth,
+    auth: Auth,
     pre_build_hooks: Vec<Box<PreBuildHook>>,
 }
 
@@ -65,7 +66,7 @@ impl TestCodexBuilder {
         self
     }
 
-    pub fn with_auth(mut self, auth: CodexAuth) -> Self {
+    pub fn with_auth(mut self, auth: Auth) -> Self {
         self.auth = auth;
         self
     }
@@ -146,7 +147,20 @@ impl TestCodexBuilder {
 
         let new_conversation = match resume_from {
             Some(path) => {
-                let auth_manager = codex_core::AuthManager::from_auth_for_testing(auth);
+                let auth_manager = match &auth {
+                    Auth::ChatGpt { handle } => {
+                        codex_core::AuthManager::from_auth_for_testing_with_home(
+                            handle.clone(),
+                            config.codex_home.clone(),
+                        )
+                    }
+                    Auth::ApiKey { handle } => {
+                        codex_core::AuthManager::from_api_key_for_testing_with_home(
+                            handle.as_str(),
+                            config.codex_home.clone(),
+                        )
+                    }
+                };
                 conversation_manager
                     .resume_conversation_from_rollout(config.clone(), path, auth_manager)
                     .await?
@@ -401,7 +415,9 @@ fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
 pub fn test_codex() -> TestCodexBuilder {
     TestCodexBuilder {
         config_mutators: vec![],
-        auth: CodexAuth::from_api_key("dummy"),
+        auth: Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         pre_build_hooks: vec![],
     }
 }

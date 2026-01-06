@@ -62,10 +62,12 @@ struct StatusHistoryCell {
     approval: String,
     sandbox: String,
     agents_summary: String,
+    auth_load_error: Option<String>,
     account: Option<StatusAccountDisplay>,
     session_id: Option<String>,
     token_usage: StatusTokenUsageData,
     rate_limits: StatusRateLimitData,
+    show_rate_limits: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -94,6 +96,114 @@ pub(crate) fn new_status_output(
     );
 
     CompositeHistoryCell::new(vec![Box::new(command), Box::new(card)])
+}
+
+pub(crate) fn new_credentials_list_output(
+    items: Vec<(
+        codex_core::auth::CredentialListEntry,
+        Option<RateLimitSnapshotDisplay>,
+        Option<String>,
+    )>,
+    now: DateTime<Local>,
+) -> PlainHistoryCell {
+    let all_chatgpt = items
+        .iter()
+        .all(|(entry, _, _)| entry.mode == codex_app_server_protocol::AuthMode::ChatGPT);
+    let header = if all_chatgpt {
+        "Workspaces"
+    } else {
+        "Credentials"
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(header));
+
+    for (entry, snapshot, unusable_message) in items {
+        let label = entry
+            .name
+            .clone()
+            .or(entry.chatgpt_email.clone())
+            .unwrap_or_else(|| match entry.mode {
+                codex_app_server_protocol::AuthMode::ChatGPT => "ChatGPT".to_string(),
+                codex_app_server_protocol::AuthMode::ApiKey => "API key".to_string(),
+            });
+
+        let marker: Span<'static> = if entry.is_active {
+            "★".into()
+        } else {
+            " ".into()
+        };
+
+        lines.push(Line::from(vec![
+            "• ".into(),
+            marker,
+            " ".into(),
+            format!("#{} {label}", entry.id).into(),
+        ]));
+
+        if let Some(message) = unusable_message {
+            lines.push(vec!["  ".into(), format!("■ {message}").red()].into());
+        }
+
+        if entry.mode == codex_app_server_protocol::AuthMode::ChatGPT {
+            let rate_limits = compose_rate_limit_data(snapshot.as_ref(), now);
+            match rate_limits {
+                StatusRateLimitData::Available(rows) | StatusRateLimitData::Stale(rows) => {
+                    if rows.is_empty() {
+                        lines.push(Line::from(vec![
+                            "  ".into(),
+                            "Limits: data not available yet".dim(),
+                        ]));
+                    } else {
+                        for row in rows {
+                            match row.value {
+                                StatusRateLimitValue::Window {
+                                    percent_used,
+                                    resets_at,
+                                } => {
+                                    let percent_remaining =
+                                        (100.0 - percent_used).clamp(0.0, 100.0);
+                                    let bar = render_status_limit_progress_bar(percent_remaining);
+                                    let summary = format_status_limit_summary(percent_remaining);
+                                    let mut spans: Vec<Span<'static>> = vec![
+                                        "  ".into(),
+                                        format!("{}: ", row.label).into(),
+                                        bar.into(),
+                                        " ".into(),
+                                        summary.into(),
+                                    ];
+                                    if let Some(resets_at) = resets_at {
+                                        spans.push(" ".dim());
+                                        spans.push(
+                                            Span::from(format!("(resets {resets_at})")).dim(),
+                                        );
+                                    }
+                                    lines.push(Line::from(spans));
+                                }
+                                StatusRateLimitValue::Text(text) => {
+                                    lines.push(Line::from(vec![
+                                        "  ".into(),
+                                        format!("{}: ", row.label).into(),
+                                        text.into(),
+                                    ]));
+                                }
+                            }
+                        }
+                    }
+                }
+                StatusRateLimitData::Missing => {
+                    lines.push(Line::from(vec![
+                        "  ".into(),
+                        "Limits: data not available yet".dim(),
+                    ]));
+                }
+            }
+        }
+
+        lines.push(Line::from(""));
+    }
+
+    PlainHistoryCell::new(lines)
 }
 
 impl StatusHistoryCell {
@@ -129,6 +239,7 @@ impl StatusHistoryCell {
             }
         };
         let agents_summary = compose_agents_summary(config);
+        let auth_load_error = auth_manager.auth_load_error();
         let account = compose_account_display(auth_manager, plan_type);
         let session_id = session_id.as_ref().map(std::string::ToString::to_string);
         let default_usage = TokenUsage::default();
@@ -149,6 +260,7 @@ impl StatusHistoryCell {
             context_window,
         };
         let rate_limits = compose_rate_limit_data(rate_limits, now);
+        let show_rate_limits = auth_manager.list_credentials().len() <= 1;
 
         Self {
             model_name,
@@ -157,10 +269,12 @@ impl StatusHistoryCell {
             approval,
             sandbox,
             agents_summary,
+            auth_load_error,
             account,
             session_id,
             token_usage,
             rate_limits,
+            show_rate_limits,
         }
     }
 
@@ -341,6 +455,9 @@ impl HistoryCell for StatusHistoryCell {
         if account_value.is_some() {
             push_label(&mut labels, &mut seen, "Account");
         }
+        if self.auth_load_error.is_some() {
+            push_label(&mut labels, &mut seen, "Error");
+        }
         if self.session_id.is_some() {
             push_label(&mut labels, &mut seen, "Session");
         }
@@ -385,6 +502,13 @@ impl HistoryCell for StatusHistoryCell {
         lines.push(formatter.line("Sandbox", vec![Span::from(self.sandbox.clone())]));
         lines.push(formatter.line("Agents.md", vec![Span::from(self.agents_summary.clone())]));
 
+        if let Some(err) = self.auth_load_error.as_ref() {
+            lines.push(formatter.line(
+                "Error",
+                vec![Span::from(format!("Failed to load auth.json: {err}")).red()],
+            ));
+        }
+
         if let Some(account_value) = account_value {
             lines.push(formatter.line("Account", vec![Span::from(account_value)]));
         }
@@ -403,7 +527,9 @@ impl HistoryCell for StatusHistoryCell {
             lines.push(formatter.line("Context window", spans));
         }
 
-        lines.extend(self.rate_limit_lines(available_inner_width, &formatter));
+        if self.show_rate_limits {
+            lines.extend(self.rate_limit_lines(available_inner_width, &formatter));
+        }
 
         let content_width = lines.iter().map(line_display_width).max().unwrap_or(0);
         let inner_width = content_width.min(available_inner_width);

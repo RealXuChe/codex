@@ -54,10 +54,14 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
     assert_eq!(access, "new-access-token");
 
     let stored = ctx.load_auth()?;
-    let tokens = stored.tokens.as_ref().context("tokens should exist")?;
+    let entry = stored
+        .chatgpt_entries
+        .first()
+        .context("chatgpt entry should exist")?;
+    let tokens = &entry.tokens;
     assert_eq!(tokens.access_token, "new-access-token");
     assert_eq!(tokens.refresh_token, "new-refresh-token");
-    let refreshed_at = stored
+    let refreshed_at = entry
         .last_refresh
         .as_ref()
         .context("last_refresh should be recorded")?;
@@ -182,6 +186,8 @@ impl RefreshTokenTestContext {
         };
         let auth_dot_json = AuthDotJson {
             openai_api_key: None,
+            chatgpt_entries: Vec::new(),
+            api_keys: Vec::new(),
             tokens: Some(tokens),
             last_refresh: Some(initial_last_refresh),
         };
@@ -194,8 +200,14 @@ impl RefreshTokenTestContext {
         let endpoint = format!("{}/oauth/token", server.uri());
         let env_guard = EnvGuard::set(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, endpoint);
 
-        let auth = CodexAuth::from_auth_storage(codex_home.path(), AuthCredentialsStoreMode::File)?
-            .context("auth should load from storage")?;
+        let auth = codex_core::auth::load_auth_from_storage(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+        )?
+        .context("auth should load from storage")?;
+        let codex_core::auth::Auth::ChatGpt { handle: auth } = auth else {
+            anyhow::bail!("expected ChatGPT auth");
+        };
 
         Ok(Self {
             codex_home,

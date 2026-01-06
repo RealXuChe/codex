@@ -1,8 +1,8 @@
 use crate::AuthManager;
 #[cfg(any(test, feature = "test-support"))]
-use crate::CodexAuth;
-#[cfg(any(test, feature = "test-support"))]
 use crate::ModelProviderInfo;
+#[cfg(any(test, feature = "test-support"))]
+use crate::auth::Auth;
 use crate::codex::Codex;
 use crate::codex::CodexSpawnOk;
 use crate::codex::INITIAL_SUBMIT_ID;
@@ -65,9 +65,9 @@ impl ConversationManager {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    /// Construct with a dummy AuthManager containing the provided CodexAuth.
+    /// Construct with a dummy AuthManager containing the provided auth.
     /// Used for integration tests: should not be used by ordinary business logic.
-    pub fn with_models_provider(auth: CodexAuth, provider: ModelProviderInfo) -> Self {
+    pub fn with_models_provider(auth: Auth, provider: ModelProviderInfo) -> Self {
         let temp_dir = tempfile::tempdir().unwrap_or_else(|err| panic!("temp codex home: {err}"));
         let codex_home = temp_dir.path().to_path_buf();
         let mut manager = Self::with_models_provider_and_home(auth, provider, codex_home);
@@ -76,14 +76,21 @@ impl ConversationManager {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    /// Construct with a dummy AuthManager containing the provided CodexAuth and codex home.
+    /// Construct with a dummy AuthManager containing the provided auth and codex home.
     /// Used for integration tests: should not be used by ordinary business logic.
     pub fn with_models_provider_and_home(
-        auth: CodexAuth,
+        auth: Auth,
         provider: ModelProviderInfo,
         codex_home: PathBuf,
     ) -> Self {
-        let auth_manager = crate::AuthManager::from_auth_for_testing_with_home(auth, codex_home);
+        let auth_manager = match auth {
+            Auth::ChatGpt { handle } => {
+                crate::AuthManager::from_auth_for_testing_with_home(handle, codex_home)
+            }
+            Auth::ApiKey { handle } => {
+                crate::AuthManager::from_api_key_for_testing_with_home(handle.as_str(), codex_home)
+            }
+        };
         let skills_manager = Arc::new(SkillsManager::new(auth_manager.codex_home().to_path_buf()));
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),

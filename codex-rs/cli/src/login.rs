@@ -1,6 +1,4 @@
-use codex_app_server_protocol::AuthMode;
 use codex_common::CliConfigOverrides;
-use codex_core::CodexAuth;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::auth::CLIENT_ID;
 use codex_core::auth::login_with_api_key;
@@ -141,19 +139,17 @@ pub async fn run_login_with_device_code(
 pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
-    match CodexAuth::from_auth_storage(&config.codex_home, config.cli_auth_credentials_store_mode) {
-        Ok(Some(auth)) => match auth.mode {
-            AuthMode::ApiKey => match auth.get_token().await {
-                Ok(api_key) => {
-                    eprintln!("Logged in using an API key - {}", safe_format_key(&api_key));
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    eprintln!("Unexpected error retrieving API key: {e}");
-                    std::process::exit(1);
-                }
-            },
-            AuthMode::ChatGPT => {
+    match codex_core::auth::load_auth_from_storage(
+        &config.codex_home,
+        config.cli_auth_credentials_store_mode,
+    ) {
+        Ok(Some(auth)) => match auth {
+            codex_core::auth::Auth::ApiKey { handle } => {
+                let api_key = handle.bearer_token();
+                eprintln!("Logged in using an API key - {}", safe_format_key(&api_key));
+                std::process::exit(0);
+            }
+            codex_core::auth::Auth::ChatGpt { .. } => {
                 eprintln!("Logged in using ChatGPT");
                 std::process::exit(0);
             }
