@@ -303,6 +303,20 @@ pub(crate) struct App {
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
     pub(crate) deferred_history_lines: Vec<Line<'static>>,
+    /// While a task is running, buffer terminal scrollback output so it can be rolled back on
+    /// stream retry and only flushed once the corresponding model output is committed.
+    ///
+    /// We treat `RawResponseItem` as the commit boundary signal: it is emitted only when core
+    /// actually writes to history/rollout (and is not itself persisted to rollout).
+    ///
+    /// NOTE: UI correctness relies on an implicit ordering: the final `AgentMessage` for an
+    /// output item is emitted (via legacy events from `ItemCompleted`) before the corresponding
+    /// `RawResponseItem` commit signal. This lets the UI render the text first, then “commit” it
+    /// (or roll it back on retry) when `RawResponseItem` arrives.
+    turn_transcript_checkpoint: Option<usize>,
+    turn_pending_commit_signal: bool,
+    turn_scrollback_buffer_has_emitted_history_lines: bool,
+    turn_scrollback_buffered_lines: Vec<Line<'static>>,
     has_emitted_history_lines: bool,
 
     pub(crate) enhanced_keys_supported: bool,
@@ -332,6 +346,53 @@ impl App {
         current
     }
 
+    fn maybe_commit_turn_boundary(&mut self, tui: &mut tui::Tui) {
+        let Some(checkpoint) = self.turn_transcript_checkpoint else {
+            return;
+        };
+        if !self.turn_pending_commit_signal {
+            return;
+        }
+        if self.transcript_cells.len() == checkpoint
+            && self.turn_scrollback_buffered_lines.is_empty()
+        {
+            return;
+        }
+
+        self.turn_transcript_checkpoint = Some(self.transcript_cells.len());
+        self.turn_pending_commit_signal = false;
+        self.flush_turn_scrollback_buffer(tui);
+    }
+
+    fn flush_turn_scrollback_buffer(&mut self, tui: &mut tui::Tui) {
+        let buffered = std::mem::take(&mut self.turn_scrollback_buffered_lines);
+        if buffered.is_empty() {
+            return;
+        }
+
+        self.has_emitted_history_lines = self.turn_scrollback_buffer_has_emitted_history_lines;
+        if self.overlay.is_some() {
+            self.deferred_history_lines.extend(buffered);
+        } else {
+            tui.insert_history_lines(buffered);
+        }
+    }
+
+    fn rollback_turn_transcript_to_checkpoint(&mut self, tui: &mut tui::Tui) {
+        let Some(checkpoint) = self.turn_transcript_checkpoint else {
+            return;
+        };
+
+        self.transcript_cells.truncate(checkpoint);
+        if let Some(Overlay::Transcript(t)) = &mut self.overlay {
+            t.truncate_cells(checkpoint);
+        }
+
+        self.turn_pending_commit_signal = false;
+        self.turn_scrollback_buffer_has_emitted_history_lines = self.has_emitted_history_lines;
+        self.turn_scrollback_buffered_lines.clear();
+        tui.frame_requester().schedule_frame();
+    }
     async fn shutdown_current_conversation(&mut self) {
         if let Some(conversation_id) = self.chat_widget.conversation_id() {
             self.suppress_shutdown_complete = true;
@@ -447,6 +508,10 @@ impl App {
             transcript_cells: Vec::new(),
             overlay: None,
             deferred_history_lines: Vec::new(),
+            turn_transcript_checkpoint: None,
+            turn_pending_commit_signal: false,
+            turn_scrollback_buffer_has_emitted_history_lines: false,
+            turn_scrollback_buffered_lines: Vec::new(),
             has_emitted_history_lines: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
@@ -673,17 +738,30 @@ impl App {
                     // Only insert a separating blank line for new cells that are not
                     // part of an ongoing stream. Streaming continuations should not
                     // accrue extra blank lines between chunks.
-                    if !cell.is_stream_continuation() {
-                        if self.has_emitted_history_lines {
-                            display.insert(0, Line::from(""));
-                        } else {
-                            self.has_emitted_history_lines = true;
+                    if self.turn_transcript_checkpoint.is_some() {
+                        if !cell.is_stream_continuation() {
+                            if self.turn_scrollback_buffer_has_emitted_history_lines {
+                                display.insert(0, Line::from(""));
+                            } else {
+                                self.turn_scrollback_buffer_has_emitted_history_lines = true;
+                            }
                         }
-                    }
-                    if self.overlay.is_some() {
-                        self.deferred_history_lines.extend(display);
+                        self.turn_scrollback_buffered_lines.extend(display);
+                        tui.frame_requester().schedule_frame();
+                        self.maybe_commit_turn_boundary(tui);
                     } else {
-                        tui.insert_history_lines(display);
+                        if !cell.is_stream_continuation() {
+                            if self.has_emitted_history_lines {
+                                display.insert(0, Line::from(""));
+                            } else {
+                                self.has_emitted_history_lines = true;
+                            }
+                        }
+                        if self.overlay.is_some() {
+                            self.deferred_history_lines.extend(display);
+                        } else {
+                            tui.insert_history_lines(display);
+                        }
                     }
                 }
             }
@@ -715,6 +793,36 @@ impl App {
                 {
                     self.suppress_shutdown_complete = false;
                     return Ok(true);
+                }
+                if matches!(&event.msg, EventMsg::TaskStarted(_)) {
+                    self.turn_transcript_checkpoint = Some(self.transcript_cells.len());
+                    self.turn_pending_commit_signal = false;
+                    self.turn_scrollback_buffer_has_emitted_history_lines =
+                        self.has_emitted_history_lines;
+                    self.turn_scrollback_buffered_lines.clear();
+                }
+                if matches!(&event.msg, EventMsg::RawResponseItem(_))
+                    && self.turn_transcript_checkpoint.is_some()
+                {
+                    // `RawResponseItem` is used as the commit boundary. This assumes core has
+                    // already emitted the user-visible `AgentMessage` for the item.
+                    self.turn_pending_commit_signal = true;
+                    self.maybe_commit_turn_boundary(tui);
+                }
+                if matches!(&event.msg, EventMsg::StreamError(_)) {
+                    self.rollback_turn_transcript_to_checkpoint(tui);
+                }
+                if matches!(
+                    &event.msg,
+                    EventMsg::TaskComplete(_) | EventMsg::TurnAborted(_)
+                ) {
+                    self.turn_pending_commit_signal = true;
+                    self.maybe_commit_turn_boundary(tui);
+                    self.turn_transcript_checkpoint = None;
+                    self.turn_pending_commit_signal = false;
+                    self.turn_scrollback_buffer_has_emitted_history_lines =
+                        self.has_emitted_history_lines;
+                    self.turn_scrollback_buffered_lines.clear();
                 }
                 if let EventMsg::ListSkillsResponse(response) = &event.msg {
                     let cwd = self.chat_widget.config_ref().cwd.clone();
@@ -1200,6 +1308,10 @@ mod tests {
             transcript_cells: Vec::new(),
             overlay: None,
             deferred_history_lines: Vec::new(),
+            turn_transcript_checkpoint: None,
+            turn_pending_commit_signal: false,
+            turn_scrollback_buffer_has_emitted_history_lines: false,
+            turn_scrollback_buffered_lines: Vec::new(),
             has_emitted_history_lines: false,
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
@@ -1241,6 +1353,10 @@ mod tests {
                 transcript_cells: Vec::new(),
                 overlay: None,
                 deferred_history_lines: Vec::new(),
+                turn_transcript_checkpoint: None,
+                turn_pending_commit_signal: false,
+                turn_scrollback_buffer_has_emitted_history_lines: false,
+                turn_scrollback_buffered_lines: Vec::new(),
                 has_emitted_history_lines: false,
                 enhanced_keys_supported: false,
                 commit_anim_running: Arc::new(AtomicBool::new(false)),
