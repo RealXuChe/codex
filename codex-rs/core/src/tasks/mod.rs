@@ -156,8 +156,19 @@ impl Session {
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
-        for task in self.take_all_running_tasks().await {
+        let tasks = self.take_all_running_tasks().await;
+        let should_record_interrupt_marker = matches!(reason, TurnAbortReason::Interrupted);
+        let marker_turn_context = should_record_interrupt_marker
+            .then(|| tasks.first().map(|task| Arc::clone(&task.turn_context)))
+            .flatten();
+
+        for task in tasks {
             self.handle_task_abort(task, reason.clone()).await;
+        }
+
+        if let Some(turn_context) = marker_turn_context {
+            self.record_user_interrupt_marker(turn_context.as_ref())
+                .await;
         }
         self.close_unified_exec_sessions().await;
     }

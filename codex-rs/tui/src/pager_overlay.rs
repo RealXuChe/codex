@@ -466,6 +466,14 @@ impl TranscriptOverlay {
         }
     }
 
+    pub(crate) fn truncate_cells(&mut self, len: usize) {
+        self.cells.truncate(len);
+        if self.highlight_cell.is_some_and(|idx| idx >= len) {
+            self.highlight_cell = None;
+        }
+        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+    }
+
     pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
         self.highlight_cell = cell;
         self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);

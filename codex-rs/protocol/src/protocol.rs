@@ -70,6 +70,12 @@ pub enum Op {
     /// This server sends [`EventMsg::TurnAborted`] in response.
     Interrupt,
 
+    /// Start a new turn without adding a new user message.
+    ///
+    /// This is primarily used to retry/continue streaming output after an
+    /// interruption without altering the conversation history.
+    Continue,
+
     /// Input from the user
     UserInput {
         /// User input items, see `InputItem`

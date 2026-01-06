@@ -156,4 +156,12 @@ async fn interrupt_tool_records_history_entries() {
         secs >= 0.1,
         "expected at least one tenth of a second of elapsed time, got {secs}"
     );
+
+    let developer_texts = requests[1].message_input_texts("developer");
+    assert!(
+        developer_texts
+            .iter()
+            .any(|text| text == "<event user_interrupt=\"true\"/>"),
+        "expected user interrupt marker in follow-up request; developer texts: {developer_texts:?}"
+    );
 }
