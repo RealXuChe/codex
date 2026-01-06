@@ -10,11 +10,12 @@
 use super::compact::COMPACT_WARNING_MESSAGE;
 use super::compact::FIRST_REPLY;
 use super::compact::SUMMARY_TEXT;
-use codex_core::CodexAuth;
 use codex_core::CodexConversation;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
 use codex_core::NewConversation;
+use codex_core::auth::ApiKeyAuth;
+use codex_core::auth::Auth;
 use codex_core::built_in_model_providers;
 use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::config::Config;
@@ -869,7 +870,9 @@ async fn start_test_conversation(
         config.model = Some(model.to_string());
     }
     let manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let NewConversation { conversation, .. } = manager
@@ -912,8 +915,7 @@ async fn resume_conversation(
     config: &Config,
     path: std::path::PathBuf,
 ) -> Arc<CodexConversation> {
-    let auth_manager =
-        codex_core::AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    let auth_manager = codex_core::AuthManager::from_api_key_for_testing("dummy");
     let NewConversation { conversation, .. } = manager
         .resume_conversation_from_rollout(config.clone(), path, auth_manager)
         .await

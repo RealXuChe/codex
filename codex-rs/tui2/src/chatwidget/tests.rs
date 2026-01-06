@@ -6,7 +6,8 @@ use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
 use codex_common::approval_presets::builtin_approval_presets;
 use codex_core::AuthManager;
-use codex_core::CodexAuth;
+use codex_core::auth::ApiKeyAuth;
+use codex_core::auth::Auth;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::Constrained;
@@ -303,10 +304,12 @@ async fn helpers_are_available_and_do_not_panic() {
     let cfg = test_config().await;
     let resolved_model = ModelsManager::get_model_offline(cfg.model.as_deref());
     let conversation_manager = Arc::new(ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("test"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("test".to_string()),
+        },
         cfg.model_provider.clone(),
     ));
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
+    let auth_manager = AuthManager::from_api_key_for_testing("test");
     let init = ChatWidgetInit {
         config: cfg,
         frame_requester: FrameRequester::test_dummy(),
@@ -353,7 +356,7 @@ async fn make_chatwidget_manual(
         animations_enabled: cfg.animations,
         skills: None,
     });
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
+    let auth_manager = AuthManager::from_api_key_for_testing("test");
     let widget = ChatWidget {
         app_event_tx,
         codex_op_tx: op_tx,

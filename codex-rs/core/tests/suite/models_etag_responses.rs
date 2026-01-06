@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use codex_core::CodexAuth;
+use codex_core::auth::Auth;
 use codex_core::features::Feature;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
@@ -45,7 +46,7 @@ async fn refresh_models_on_models_etag_mismatch_and_avoid_duplicate_models_fetch
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let mut builder = test_codex()
-        .with_auth(auth)
+        .with_auth(Auth::ChatGpt { handle: auth })
         .with_model("gpt-5")
         .with_config(|config| {
             config.features.enable(Feature::RemoteModels);

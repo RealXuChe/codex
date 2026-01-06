@@ -1160,8 +1160,9 @@ mod tests {
     use crate::history_cell::UserHistoryCell;
     use crate::history_cell::new_session_info;
     use codex_core::AuthManager;
-    use codex_core::CodexAuth;
     use codex_core::ConversationManager;
+    use codex_core::auth::ApiKeyAuth;
+    use codex_core::auth::Auth;
     use codex_core::protocol::AskForApproval;
     use codex_core::protocol::Event;
     use codex_core::protocol::EventMsg;
@@ -1178,11 +1179,12 @@ mod tests {
         let config = chat_widget.config_ref().clone();
         let current_model = "gpt-5.2-codex".to_string();
         let server = Arc::new(ConversationManager::with_models_provider(
-            CodexAuth::from_api_key("Test API Key"),
+            Auth::ApiKey {
+                handle: ApiKeyAuth::new("Test API Key".to_string()),
+            },
             config.model_provider.clone(),
         ));
-        let auth_manager =
-            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+        let auth_manager = AuthManager::from_api_key_for_testing("Test API Key");
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
 
         App {
@@ -1217,11 +1219,12 @@ mod tests {
         let config = chat_widget.config_ref().clone();
         let current_model = "gpt-5.2-codex".to_string();
         let server = Arc::new(ConversationManager::with_models_provider(
-            CodexAuth::from_api_key("Test API Key"),
+            Auth::ApiKey {
+                handle: ApiKeyAuth::new("Test API Key".to_string()),
+            },
             config.model_provider.clone(),
         ));
-        let auth_manager =
-            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+        let auth_manager = AuthManager::from_api_key_for_testing("Test API Key");
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
 
         (

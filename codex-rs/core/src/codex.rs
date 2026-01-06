@@ -2741,7 +2741,6 @@ pub(crate) use tests::make_session_and_context_with_rx;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CodexAuth;
     use crate::config::ConfigBuilder;
     use crate::exec::ExecToolCallOutput;
     use crate::function_tool::FunctionCallError;

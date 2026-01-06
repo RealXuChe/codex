@@ -3,6 +3,8 @@ use codex_core::CodexAuth;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
 use codex_core::NewConversation;
+use codex_core::auth::ApiKeyAuth;
+use codex_core::auth::Auth;
 use codex_core::built_in_model_providers;
 use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::compact::SUMMARY_PREFIX;
@@ -145,7 +147,9 @@ async fn summarize_context_three_requests_and_instructions() {
     set_test_compact_prompt(&mut config);
     config.model_auto_compact_token_limit = Some(200_000);
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let NewConversation {
@@ -339,7 +343,9 @@ async fn manual_compact_uses_custom_prompt() {
     config.compact_prompt = Some(custom_prompt.to_string());
 
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let codex = conversation_manager
@@ -419,7 +425,9 @@ async fn manual_compact_emits_api_and_local_token_usage_events() {
     set_test_compact_prompt(&mut config);
 
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let NewConversation {
@@ -1070,7 +1078,9 @@ async fn auto_compact_runs_after_token_limit_hit() {
     set_test_compact_prompt(&mut config);
     config.model_auto_compact_token_limit = Some(200_000);
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let codex = conversation_manager
@@ -1404,7 +1414,9 @@ async fn auto_compact_persists_rollout_entries() {
     set_test_compact_prompt(&mut config);
     config.model_auto_compact_token_limit = Some(200_000);
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let NewConversation {
@@ -1516,7 +1528,9 @@ async fn manual_compact_retries_after_context_window_error() {
     set_test_compact_prompt(&mut config);
     config.model_auto_compact_token_limit = Some(200_000);
     let codex = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     )
     .new_conversation(config)
@@ -1648,7 +1662,9 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
     config.model_provider = model_provider;
     set_test_compact_prompt(&mut config);
     let codex = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     )
     .new_conversation(config)
@@ -1852,7 +1868,9 @@ async fn auto_compact_allows_multiple_attempts_when_interleaved_with_other_turn_
     set_test_compact_prompt(&mut config);
     config.model_auto_compact_token_limit = Some(200);
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let codex = conversation_manager
@@ -1965,7 +1983,9 @@ async fn auto_compact_triggers_after_function_call_over_95_percent_usage() {
     config.model_auto_compact_token_limit = Some(limit);
 
     let codex = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     )
     .new_conversation(config)
@@ -2085,7 +2105,9 @@ async fn auto_compact_counts_encrypted_reasoning_before_last_user() {
         mount_compact_json_once(&server, serde_json::json!({ "output": compacted_history })).await;
 
     let codex = test_codex()
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_auth(Auth::ChatGpt {
+            handle: CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        })
         .with_config(|config| {
             set_test_compact_prompt(config);
             config.model_auto_compact_token_limit = Some(300);

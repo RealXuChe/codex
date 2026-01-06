@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 #[cfg(test)]
 use serial_test::serial;
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
 use std::io::ErrorKind;
@@ -23,8 +24,8 @@ use sha2::Sha256;
 
 pub use crate::auth::storage::AuthCredentialsStoreMode;
 pub use crate::auth::storage::AuthDotJson;
-use crate::auth::storage::ChatGptAuthEntry;
 use crate::auth::storage::AuthStorageBackend;
+use crate::auth::storage::ChatGptAuthEntry;
 use crate::auth::storage::create_auth_storage;
 use crate::config::Config;
 use crate::error::RefreshTokenFailedError;
@@ -166,6 +167,21 @@ impl From<RefreshTokenError> for std::io::Error {
     }
 }
 
+fn account_plan_type_from_internal(plan: &InternalPlanType) -> AccountPlanType {
+    match plan {
+        InternalPlanType::Known(k) => match k {
+            InternalKnownPlan::Free => AccountPlanType::Free,
+            InternalKnownPlan::Plus => AccountPlanType::Plus,
+            InternalKnownPlan::Pro => AccountPlanType::Pro,
+            InternalKnownPlan::Team => AccountPlanType::Team,
+            InternalKnownPlan::Business => AccountPlanType::Business,
+            InternalKnownPlan::Enterprise => AccountPlanType::Enterprise,
+            InternalKnownPlan::Edu => AccountPlanType::Edu,
+        },
+        InternalPlanType::Unknown(_) => AccountPlanType::Unknown,
+    }
+}
+
 impl CodexAuth {
     pub async fn refresh_token(&self) -> Result<String, RefreshTokenError> {
         tracing::info!("Refreshing token");
@@ -219,9 +235,13 @@ impl CodexAuth {
 
         let now = Utc::now();
         if self.chatgpt_key.is_some() {
-            let entry = self.get_current_chatgpt_entry_mut(&mut auth_dot_json).ok_or_else(|| {
-                RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
-            })?;
+            let entry = self
+                .get_current_chatgpt_entry_mut(&mut auth_dot_json)
+                .ok_or_else(|| {
+                    RefreshTokenError::Transient(std::io::Error::other(
+                        "Token data is not available.",
+                    ))
+                })?;
             entry.tokens = updated_tokens.clone();
             entry.last_refresh = Some(now);
         } else {
@@ -245,18 +265,17 @@ impl CodexAuth {
             .get_current_auth_json()
             .ok_or(std::io::Error::other("Token data is not available."))?;
 
-        let (tokens, last_refresh) =
-            if let Some(entry) = self.get_current_chatgpt_entry(&auth_dot_json) {
-                (entry.tokens.clone(), entry.last_refresh)
-            } else {
-                (
-                    auth_dot_json
-                        .tokens
-                        .clone()
-                        .ok_or(std::io::Error::other("Token data is not available."))?,
-                    auth_dot_json.last_refresh,
-                )
-            };
+        let (tokens, last_refresh) = if let Some(entry) = self.get_current_chatgpt_entry(&auth_dot_json) {
+            (entry.tokens.clone(), entry.last_refresh)
+        } else {
+            (
+                auth_dot_json
+                    .tokens
+                    .clone()
+                    .ok_or(std::io::Error::other("Token data is not available."))?,
+                auth_dot_json.last_refresh,
+            )
+        };
 
         let Some(last_refresh) = last_refresh else {
             return Err(std::io::Error::other("Token data is not available."));
@@ -289,22 +308,12 @@ impl CodexAuth {
     /// mapped from the ID token's internal plan value. Prefer this when you
     /// need to make UI or product decisions based on the user's subscription.
     pub fn account_plan_type(&self) -> Option<AccountPlanType> {
-        let map_known = |kp: &InternalKnownPlan| match kp {
-            InternalKnownPlan::Free => AccountPlanType::Free,
-            InternalKnownPlan::Plus => AccountPlanType::Plus,
-            InternalKnownPlan::Pro => AccountPlanType::Pro,
-            InternalKnownPlan::Team => AccountPlanType::Team,
-            InternalKnownPlan::Business => AccountPlanType::Business,
-            InternalKnownPlan::Enterprise => AccountPlanType::Enterprise,
-            InternalKnownPlan::Edu => AccountPlanType::Edu,
-        };
-
-        self.get_current_token_data()
-            .and_then(|t| t.id_token.chatgpt_plan_type)
-            .map(|pt| match pt {
-                InternalPlanType::Known(k) => map_known(&k),
-                InternalPlanType::Unknown(_) => AccountPlanType::Unknown,
-            })
+        self.get_current_token_data().and_then(|t| {
+            t.id_token
+                .chatgpt_plan_type
+                .as_ref()
+                .map(account_plan_type_from_internal)
+        })
     }
 
     fn get_current_auth_json(&self) -> Option<AuthDotJson> {
@@ -317,9 +326,10 @@ impl CodexAuth {
         auth_dot_json: &'a AuthDotJson,
     ) -> Option<&'a ChatGptAuthEntry> {
         let key = self.chatgpt_key.as_ref()?;
-        auth_dot_json.chatgpt_entries.iter().find(|entry| {
-            ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key)
-        })
+        auth_dot_json
+            .chatgpt_entries
+            .iter()
+            .find(|entry| ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key))
     }
 
     fn get_current_chatgpt_entry_mut<'a>(
@@ -327,9 +337,10 @@ impl CodexAuth {
         auth_dot_json: &'a mut AuthDotJson,
     ) -> Option<&'a mut ChatGptAuthEntry> {
         let key = self.chatgpt_key.as_ref()?;
-        auth_dot_json.chatgpt_entries.iter_mut().find(|entry| {
-            ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key)
-        })
+        auth_dot_json
+            .chatgpt_entries
+            .iter_mut()
+            .find(|entry| ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key))
     }
 
     fn get_current_token_data(&self) -> Option<TokenData> {
@@ -416,11 +427,13 @@ pub fn login_with_api_key(
         existing.api_key = api_key.to_string();
     } else {
         let id = next_global_entry_id(&auth_dot_json);
-        auth_dot_json.api_keys.push(crate::auth::storage::ApiKeyAuthEntry {
-            id,
-            name: None,
-            api_key: api_key.to_string(),
-        });
+        auth_dot_json
+            .api_keys
+            .push(crate::auth::storage::ApiKeyAuthEntry {
+                id,
+                name: None,
+                api_key: api_key.to_string(),
+            });
     }
 
     auth_dot_json.openai_api_key = None;
@@ -451,9 +464,11 @@ pub fn persist_chatgpt_tokens(
     let key = ChatGptKey::from_tokens(&tokens)
         .ok_or_else(|| std::io::Error::other("ChatGPT tokens missing required identity fields"))?;
 
-    if let Some(existing) = auth_dot_json.chatgpt_entries.iter_mut().find(|entry| {
-        ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == key)
-    }) {
+    if let Some(existing) = auth_dot_json
+        .chatgpt_entries
+        .iter_mut()
+        .find(|entry| ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == key))
+    {
         existing.tokens = tokens;
         existing.last_refresh = Some(Utc::now());
     } else {
@@ -486,7 +501,10 @@ fn next_global_entry_id(auth_dot_json: &AuthDotJson) -> u32 {
 
 fn migrate_legacy_auth_dot_json(auth_dot_json: &mut AuthDotJson) {
     if let Some(api_key) = auth_dot_json.openai_api_key.take()
-        && auth_dot_json.api_keys.iter().all(|entry| entry.api_key != api_key)
+        && auth_dot_json
+            .api_keys
+            .iter()
+            .all(|entry| entry.api_key != api_key)
     {
         let id = next_global_entry_id(auth_dot_json);
         auth_dot_json
@@ -498,20 +516,19 @@ fn migrate_legacy_auth_dot_json(auth_dot_json: &mut AuthDotJson) {
             });
     }
 
-    if let Some(tokens) = auth_dot_json.tokens.take() {
-        if auth_dot_json
+    if let Some(tokens) = auth_dot_json.tokens.take()
+        && auth_dot_json
             .chatgpt_entries
             .iter()
             .all(|entry| entry.tokens != tokens)
-        {
-            let id = next_global_entry_id(auth_dot_json);
-            auth_dot_json.chatgpt_entries.push(ChatGptAuthEntry {
-                id,
-                name: None,
-                tokens,
-                last_refresh: auth_dot_json.last_refresh,
-            });
-        }
+    {
+        let id = next_global_entry_id(auth_dot_json);
+        auth_dot_json.chatgpt_entries.push(ChatGptAuthEntry {
+            id,
+            name: None,
+            tokens,
+            last_refresh: auth_dot_json.last_refresh,
+        });
     }
     auth_dot_json.last_refresh = None;
 }
@@ -627,7 +644,11 @@ fn load_auth(
     let Some(auth_dot_json) = load_auth_dot_json_migrated(&storage)? else {
         return Ok(None);
     };
-    Ok(select_auth_from_auth_dot_json(auth_dot_json, storage, client))
+    Ok(select_auth_from_auth_dot_json(
+        auth_dot_json,
+        storage,
+        client,
+    ))
 }
 
 #[derive(Debug)]
@@ -682,58 +703,45 @@ fn select_auth_from_auth_dot_json(
     storage: Arc<dyn AuthStorageBackend>,
     client: CodexHttpClient,
 ) -> Option<Auth> {
-    if let Some(entry) = auth_dot_json.api_keys.iter().min_by_key(|entry| entry.id) {
-        return Some(Auth::ApiKey {
-            handle: ApiKeyAuth::new(entry.api_key.clone()),
-        });
+    #[derive(Clone)]
+    enum Candidate {
+        ChatGpt(ChatGptKey),
+        ApiKey(String),
     }
 
-    if let Some(api_key) = auth_dot_json.openai_api_key.as_ref() {
-        return Some(Auth::ApiKey {
-            handle: ApiKeyAuth::new(api_key.clone()),
-        });
-    }
+    let mut selected: Option<(u32, Candidate)> = None;
 
-    if !auth_dot_json.chatgpt_entries.is_empty() {
-        let mut selected = None;
-        for entry in &auth_dot_json.chatgpt_entries {
-            if let Some(key) = ChatGptKey::from_tokens(&entry.tokens) {
-                selected = Some(key);
-                break;
-            }
-        }
-        if let Some(chatgpt_key) = selected {
-            return Some(Auth::ChatGpt {
-                handle: CodexAuth {
-                    storage,
-                    auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
-                    chatgpt_key: Some(chatgpt_key),
-                    client,
-                },
-            });
+    for entry in &auth_dot_json.api_keys {
+        let candidate = (entry.id, Candidate::ApiKey(entry.api_key.clone()));
+        if selected.as_ref().is_none_or(|(id, _)| *id > candidate.0) {
+            selected = Some(candidate);
         }
     }
 
-    let tokens = auth_dot_json.tokens.clone();
-    let last_refresh = auth_dot_json.last_refresh;
-    if tokens.is_some() {
-        return Some(Auth::ChatGpt {
+    for entry in &auth_dot_json.chatgpt_entries {
+        let Some(key) = ChatGptKey::from_tokens(&entry.tokens) else {
+            continue;
+        };
+        let candidate = (entry.id, Candidate::ChatGpt(key));
+        if selected.as_ref().is_none_or(|(id, _)| *id > candidate.0) {
+            selected = Some(candidate);
+        }
+    }
+
+    match selected.map(|(_, candidate)| candidate) {
+        Some(Candidate::ApiKey(api_key)) => Some(Auth::ApiKey {
+            handle: ApiKeyAuth::new(api_key),
+        }),
+        Some(Candidate::ChatGpt(chatgpt_key)) => Some(Auth::ChatGpt {
             handle: CodexAuth {
                 storage,
-                auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
-                    openai_api_key: None,
-                    chatgpt_entries: Vec::new(),
-                    api_keys: Vec::new(),
-                    tokens,
-                    last_refresh,
-                }))),
-                chatgpt_key: None,
+                auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
+                chatgpt_key: Some(chatgpt_key),
                 client,
             },
-        });
+        }),
+        None => None,
     }
-
-    None
 }
 
 fn select_auth_from_auth_dot_json_with_override(
@@ -744,9 +752,11 @@ fn select_auth_from_auth_dot_json_with_override(
 ) -> Option<Auth> {
     match active_override {
         ActiveOverride::ChatGpt(key) => {
-            if auth_dot_json.chatgpt_entries.iter().any(|entry| {
-                ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key)
-            }) {
+            if auth_dot_json
+                .chatgpt_entries
+                .iter()
+                .any(|entry| ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key))
+            {
                 Some(Auth::ChatGpt {
                     handle: CodexAuth {
                         storage,
@@ -923,12 +933,28 @@ struct CachedAuth {
     auth_dot_json: Option<AuthDotJson>,
     auth_load_error: Option<String>,
     active_override: Option<ActiveOverride>,
+    credential_unusable: HashMap<ActiveOverride, CredentialUnusable>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ActiveOverride {
     ChatGpt(ChatGptKey),
     ApiKeyFingerprint(String),
+}
+
+#[derive(Clone, Debug)]
+enum CredentialUnusable {
+    UsageNotIncluded,
+    UsageLimitReached { message: String },
+}
+
+impl CredentialUnusable {
+    fn message(&self) -> String {
+        match self {
+            Self::UsageNotIncluded => crate::error::CodexErr::UsageNotIncluded.to_string(),
+            Self::UsageLimitReached { message } => message.clone(),
+        }
+    }
 }
 
 fn active_override_from_auth(auth: &Auth) -> Option<ActiveOverride> {
@@ -977,7 +1003,7 @@ mod tests {
             AuthFileParams {
                 openai_api_key: None,
                 chatgpt_plan_type: "pro".to_string(),
-                chatgpt_account_id: None,
+                chatgpt_account_id: Some("account_id".to_string()),
             },
             codex_home.path(),
         )
@@ -1022,7 +1048,10 @@ mod tests {
         let auth = storage
             .try_read_auth_json(&dir.path().join("auth.json"))
             .expect("auth.json should parse");
-        assert!(auth.openai_api_key.is_none(), "legacy key should be migrated");
+        assert!(
+            auth.openai_api_key.is_none(),
+            "legacy key should be migrated"
+        );
         assert!(auth.tokens.is_none(), "legacy tokens should be migrated");
         assert!(
             auth.api_keys.iter().any(|entry| entry.api_key == "sk-new"),
@@ -1043,7 +1072,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let auth = load_auth_from_storage(dir.path(), AuthCredentialsStoreMode::File)
             .expect("call should succeed");
-        assert_eq!(auth, None);
+        assert!(auth.is_none());
     }
 
     #[tokio::test]
@@ -1054,45 +1083,79 @@ mod tests {
             AuthFileParams {
                 openai_api_key: None,
                 chatgpt_plan_type: "pro".to_string(),
-                chatgpt_account_id: None,
+                chatgpt_account_id: Some("account_id".to_string()),
             },
             codex_home.path(),
         )
         .expect("failed to write auth file");
 
+        let mut auth_dot_json =
+            super::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)
+                .expect("load auth.json")
+                .expect("auth.json should exist");
+        let tokens = auth_dot_json.tokens.as_ref().expect("tokens should exist");
+        assert!(
+            tokens.id_token.chatgpt_user_id.is_some(),
+            "id_token should include chatgpt_user_id"
+        );
+        assert!(
+            tokens.account_id.is_some() || tokens.id_token.chatgpt_account_id.is_some(),
+            "tokens should include an account id"
+        );
+        migrate_legacy_auth_dot_json(&mut auth_dot_json);
+        let entry = auth_dot_json
+            .chatgpt_entries
+            .first()
+            .expect("ChatGPT entry should exist after migration");
+        assert!(
+            ChatGptKey::from_tokens(&entry.tokens).is_some(),
+            "ChatGPT entry should be keyable"
+        );
+
         let CodexAuth { auth_dot_json, .. } =
             match super::load_auth(codex_home.path(), false, AuthCredentialsStoreMode::File)
-                .unwrap()
-                .unwrap()
-            {
-                Auth::ChatGpt { handle } => handle,
-                Auth::ApiKey { .. } => panic!("expected ChatGPT auth"),
-            };
+            .unwrap()
+            .unwrap()
+        {
+            Auth::ChatGpt { handle } => handle,
+            Auth::ApiKey { .. } => panic!("expected ChatGPT auth"),
+        };
 
         let guard = auth_dot_json.lock().unwrap();
         let auth_dot_json = guard.as_ref().expect("AuthDotJson should exist");
-        let last_refresh = auth_dot_json
+        let entry = auth_dot_json
+            .chatgpt_entries
+            .first()
+            .expect("ChatGPT entry should exist after migration");
+        let last_refresh = entry
             .last_refresh
-            .expect("last_refresh should be recorded");
+            .expect("last_refresh should be recorded on migrated entry");
 
         assert_eq!(
             &AuthDotJson {
                 openai_api_key: None,
-                chatgpt_entries: Vec::new(),
-                api_keys: Vec::new(),
-                tokens: Some(TokenData {
-                    id_token: IdTokenInfo {
-                        email: Some("user@example.com".to_string()),
-                        chatgpt_plan_type: Some(InternalPlanType::Known(InternalKnownPlan::Pro)),
-                        chatgpt_account_id: None,
-                        chatgpt_user_id: Some("user-12345".to_string()),
-                        raw_jwt: fake_jwt,
+                chatgpt_entries: vec![ChatGptAuthEntry {
+                    id: 1,
+                    name: None,
+                    tokens: TokenData {
+                        id_token: IdTokenInfo {
+                            email: Some("user@example.com".to_string()),
+                            chatgpt_plan_type: Some(InternalPlanType::Known(
+                                InternalKnownPlan::Pro
+                            )),
+                            chatgpt_account_id: Some("account_id".to_string()),
+                            chatgpt_user_id: Some("user-12345".to_string()),
+                            raw_jwt: fake_jwt,
+                        },
+                        access_token: "test-access-token".to_string(),
+                        refresh_token: "test-refresh-token".to_string(),
+                        account_id: Some("account_id".to_string()),
                     },
-                    access_token: "test-access-token".to_string(),
-                    refresh_token: "test-refresh-token".to_string(),
-                    account_id: None,
-                }),
-                last_refresh: Some(last_refresh),
+                    last_refresh: Some(last_refresh),
+                }],
+                api_keys: Vec::new(),
+                tokens: None,
+                last_refresh: None,
             },
             auth_dot_json
         );
@@ -1163,8 +1226,8 @@ mod tests {
             "user_id": "user-12345",
         });
 
-        if let Some(chatgpt_account_id) = params.chatgpt_account_id {
-            let org_value = serde_json::Value::String(chatgpt_account_id);
+        if let Some(chatgpt_account_id) = params.chatgpt_account_id.as_ref() {
+            let org_value = serde_json::Value::String(chatgpt_account_id.clone());
             auth_payload["chatgpt_account_id"] = org_value;
         }
 
@@ -1179,13 +1242,18 @@ mod tests {
         let signature_b64 = b64(b"sig");
         let fake_jwt = format!("{header_b64}.{payload_b64}.{signature_b64}");
 
+        let mut tokens = json!({
+            "id_token": fake_jwt,
+            "access_token": "test-access-token",
+            "refresh_token": "test-refresh-token"
+        });
+        if let Some(account_id) = params.chatgpt_account_id.as_ref() {
+            tokens["account_id"] = serde_json::Value::String(account_id.clone());
+        }
+
         let auth_json_data = json!({
             "OPENAI_API_KEY": params.openai_api_key,
-            "tokens": {
-                "id_token": fake_jwt,
-                "access_token": "test-access-token",
-                "refresh_token": "test-refresh-token"
-            },
+            "tokens": tokens,
             "last_refresh": Utc::now(),
         });
         let auth_json = serde_json::to_string_pretty(&auth_json_data)?;
@@ -1279,7 +1347,7 @@ mod tests {
             AuthFileParams {
                 openai_api_key: None,
                 chatgpt_plan_type: "pro".to_string(),
-                chatgpt_account_id: None,
+                chatgpt_account_id: Some("account_id".to_string()),
             },
             codex_home.path(),
         )
@@ -1302,7 +1370,7 @@ mod tests {
             AuthFileParams {
                 openai_api_key: None,
                 chatgpt_plan_type: "mystery-tier".to_string(),
-                chatgpt_account_id: None,
+                chatgpt_account_id: Some("account_id".to_string()),
             },
             codex_home.path(),
         )
@@ -1335,6 +1403,16 @@ pub struct AuthManager {
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 }
 
+#[derive(Debug, Clone)]
+pub struct CredentialListEntry {
+    pub id: u32,
+    pub name: Option<String>,
+    pub mode: AuthMode,
+    pub is_active: bool,
+    pub chatgpt_email: Option<String>,
+    pub chatgpt_plan: Option<AccountPlanType>,
+}
+
 impl AuthManager {
     /// Create a new manager loading the initial auth using the provided
     /// preferred auth method. Errors loading auth are swallowed; `auth()` will
@@ -1358,6 +1436,7 @@ impl AuthManager {
                 auth_dot_json: loaded.auth_dot_json,
                 auth_load_error: loaded.auth_load_error,
                 active_override,
+                credential_unusable: HashMap::new(),
             }),
             enable_codex_api_key_env,
             auth_credentials_store_mode,
@@ -1373,6 +1452,7 @@ impl AuthManager {
             auth_dot_json: None,
             auth_load_error: None,
             active_override: None,
+            credential_unusable: HashMap::new(),
         };
         let temp_dir = tempfile::tempdir().expect("temp codex home");
         let codex_home = temp_dir.path().to_path_buf();
@@ -1398,6 +1478,7 @@ impl AuthManager {
             auth_dot_json: None,
             auth_load_error: None,
             active_override: None,
+            credential_unusable: HashMap::new(),
         };
         let temp_dir = tempfile::tempdir().expect("temp codex home");
         let codex_home = temp_dir.path().to_path_buf();
@@ -1421,6 +1502,7 @@ impl AuthManager {
             auth_dot_json: None,
             auth_load_error: None,
             active_override: None,
+            credential_unusable: HashMap::new(),
         };
         Arc::new(Self {
             codex_home,
@@ -1439,6 +1521,7 @@ impl AuthManager {
             auth_dot_json: None,
             auth_load_error: None,
             active_override: None,
+            credential_unusable: HashMap::new(),
         };
         Arc::new(Self {
             codex_home,
@@ -1481,13 +1564,15 @@ impl AuthManager {
             .clone()
             .ok_or_else(|| std::io::Error::other("Not logged in"))?;
 
-        if let Some(entry) = auth_dot_json.chatgpt_entries.iter().find(|entry| entry.id == id) {
+        if let Some(entry) = auth_dot_json
+            .chatgpt_entries
+            .iter()
+            .find(|entry| entry.id == id)
+        {
             let key = ChatGptKey::from_tokens(&entry.tokens)
                 .ok_or_else(|| std::io::Error::other("ChatGPT credential missing identity"))?;
-            let storage = create_auth_storage(
-                self.codex_home.clone(),
-                self.auth_credentials_store_mode,
-            );
+            let storage =
+                create_auth_storage(self.codex_home.clone(), self.auth_credentials_store_mode);
             let client = crate::default_client::create_client();
             let auth = select_auth_from_auth_dot_json_with_override(
                 auth_dot_json,
@@ -1516,6 +1601,188 @@ impl AuthManager {
         )))
     }
 
+    pub fn record_active_credential_usage_not_included(&self) -> Option<u32> {
+        self.record_active_credential_unusable(CredentialUnusable::UsageNotIncluded)
+    }
+
+    pub fn record_active_credential_usage_limit_reached(&self, message: String) -> Option<u32> {
+        self.record_active_credential_unusable(CredentialUnusable::UsageLimitReached { message })
+    }
+
+    pub fn credential_unusable_message_by_id(&self, id: u32) -> Option<String> {
+        let guard = self.inner.read().ok()?;
+        let auth_dot_json = guard.auth_dot_json.as_ref()?;
+
+        if let Some(entry) = auth_dot_json
+            .chatgpt_entries
+            .iter()
+            .find(|entry| entry.id == id)
+        {
+            let key = ChatGptKey::from_tokens(&entry.tokens)?;
+            return guard
+                .credential_unusable
+                .get(&ActiveOverride::ChatGpt(key))
+                .map(CredentialUnusable::message);
+        }
+
+        if let Some(entry) = auth_dot_json.api_keys.iter().find(|entry| entry.id == id) {
+            let fp = api_key_fingerprint(&entry.api_key);
+            return guard
+                .credential_unusable
+                .get(&ActiveOverride::ApiKeyFingerprint(fp))
+                .map(CredentialUnusable::message);
+        }
+
+        None
+    }
+
+    fn record_active_credential_unusable(&self, unusable: CredentialUnusable) -> Option<u32> {
+        let mut guard = self.inner.write().ok()?;
+        let auth_dot_json = guard.auth_dot_json.clone()?;
+
+        let active = guard
+            .active_override
+            .clone()
+            .or_else(|| guard.auth.as_ref().and_then(active_override_from_auth))?;
+        guard.credential_unusable.insert(active.clone(), unusable);
+
+        let mut candidates: Vec<(u32, ActiveOverride)> =
+            Vec::with_capacity(auth_dot_json.chatgpt_entries.len() + auth_dot_json.api_keys.len());
+        for entry in &auth_dot_json.chatgpt_entries {
+            let Some(key) = ChatGptKey::from_tokens(&entry.tokens) else {
+                continue;
+            };
+            candidates.push((entry.id, ActiveOverride::ChatGpt(key)));
+        }
+        for entry in &auth_dot_json.api_keys {
+            candidates.push((
+                entry.id,
+                ActiveOverride::ApiKeyFingerprint(api_key_fingerprint(&entry.api_key)),
+            ));
+        }
+        candidates.sort_by_key(|(id, _)| *id);
+
+        let active_index = candidates
+            .iter()
+            .position(|(_, candidate)| *candidate == active)?;
+
+        for offset in 1..=candidates.len() {
+            let idx = (active_index + offset) % candidates.len();
+            let (id, candidate) = candidates[idx].clone();
+            if candidate == active {
+                continue;
+            }
+            if guard.credential_unusable.contains_key(&candidate) {
+                continue;
+            }
+
+            let storage =
+                create_auth_storage(self.codex_home.clone(), self.auth_credentials_store_mode);
+            let client = crate::default_client::create_client();
+            let auth = select_auth_from_auth_dot_json_with_override(
+                auth_dot_json,
+                &candidate,
+                storage,
+                client,
+            )?;
+            guard.auth = Some(auth);
+            guard.active_override = Some(candidate);
+            return Some(id);
+        }
+
+        None
+    }
+
+    pub fn list_credentials(&self) -> Vec<CredentialListEntry> {
+        let Ok(guard) = self.inner.read() else {
+            return Vec::new();
+        };
+        let Some(auth_dot_json) = guard.auth_dot_json.as_ref() else {
+            return Vec::new();
+        };
+
+        let active_id = match guard.active_override.as_ref() {
+            Some(ActiveOverride::ChatGpt(key)) => auth_dot_json
+                .chatgpt_entries
+                .iter()
+                .find(|entry| ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *key))
+                .map(|entry| entry.id),
+            Some(ActiveOverride::ApiKeyFingerprint(fp)) => auth_dot_json
+                .api_keys
+                .iter()
+                .find(|entry| api_key_fingerprint(&entry.api_key) == *fp)
+                .map(|entry| entry.id),
+            None => None,
+        };
+
+        let mut entries =
+            Vec::with_capacity(auth_dot_json.chatgpt_entries.len() + auth_dot_json.api_keys.len());
+        for entry in &auth_dot_json.chatgpt_entries {
+            let plan = entry
+                .tokens
+                .id_token
+                .chatgpt_plan_type
+                .as_ref()
+                .map(account_plan_type_from_internal);
+
+            entries.push(CredentialListEntry {
+                id: entry.id,
+                name: entry.name.clone(),
+                mode: AuthMode::ChatGPT,
+                is_active: active_id == Some(entry.id),
+                chatgpt_email: entry.tokens.id_token.email.clone(),
+                chatgpt_plan: plan,
+            });
+        }
+        for entry in &auth_dot_json.api_keys {
+            entries.push(CredentialListEntry {
+                id: entry.id,
+                name: entry.name.clone(),
+                mode: AuthMode::ApiKey,
+                is_active: active_id == Some(entry.id),
+                chatgpt_email: None,
+                chatgpt_plan: None,
+            });
+        }
+        entries.sort_by_key(|entry| entry.id);
+        entries
+    }
+
+    pub fn auth_for_credential_by_id(&self, id: u32) -> Option<Auth> {
+        let auth_dot_json = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|guard| guard.auth_dot_json.clone())?;
+
+        if let Some(entry) = auth_dot_json
+            .chatgpt_entries
+            .iter()
+            .find(|entry| entry.id == id)
+        {
+            let key = ChatGptKey::from_tokens(&entry.tokens)?;
+            let storage =
+                create_auth_storage(self.codex_home.clone(), self.auth_credentials_store_mode);
+            let client = crate::default_client::create_client();
+            return Some(Auth::ChatGpt {
+                handle: CodexAuth {
+                    storage,
+                    auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
+                    chatgpt_key: Some(key),
+                    client,
+                },
+            });
+        }
+
+        auth_dot_json
+            .api_keys
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| Auth::ApiKey {
+                handle: ApiKeyAuth::new(entry.api_key.clone()),
+            })
+    }
+
     pub fn codex_home(&self) -> &Path {
         &self.codex_home
     }
@@ -1535,10 +1802,8 @@ impl AuthManager {
             if let Some(active_override) = guard.active_override.as_ref()
                 && let Some(auth_dot_json) = loaded.auth_dot_json.clone()
             {
-                let storage = create_auth_storage(
-                    self.codex_home.clone(),
-                    self.auth_credentials_store_mode,
-                );
+                let storage =
+                    create_auth_storage(self.codex_home.clone(), self.auth_credentials_store_mode);
                 let client = crate::default_client::create_client();
                 if let Some(overridden) = select_auth_from_auth_dot_json_with_override(
                     auth_dot_json,
@@ -1555,6 +1820,23 @@ impl AuthManager {
             guard.auth = next_auth;
             guard.auth_dot_json = loaded.auth_dot_json;
             guard.auth_load_error = loaded.auth_load_error;
+
+            if let Some(auth_dot_json) = guard.auth_dot_json.clone() {
+                guard.credential_unusable.retain(|key, _| match key {
+                    ActiveOverride::ChatGpt(active_key) => {
+                        auth_dot_json.chatgpt_entries.iter().any(|entry| {
+                            ChatGptKey::from_tokens(&entry.tokens).is_some_and(|k| k == *active_key)
+                        })
+                    }
+                    ActiveOverride::ApiKeyFingerprint(fp) => auth_dot_json
+                        .api_keys
+                        .iter()
+                        .any(|entry| api_key_fingerprint(&entry.api_key) == *fp),
+                });
+            } else {
+                guard.credential_unusable.clear();
+            }
+
             if guard.active_override.is_none()
                 && let Some(auth) = guard.auth.as_ref()
             {
@@ -1616,5 +1898,115 @@ impl AuthManager {
 
     pub fn get_auth_mode(&self) -> Option<AuthMode> {
         self.auth().map(|a| a.mode())
+    }
+
+    pub fn rename_credential_by_id(&self, id: u32, name: Option<String>) -> std::io::Result<()> {
+        let storage =
+            create_auth_storage(self.codex_home.clone(), self.auth_credentials_store_mode);
+        let mut auth_dot_json = load_auth_dot_json_migrated(&storage)?
+            .ok_or_else(|| std::io::Error::other("Not logged in"))?;
+
+        if let Some(entry) = auth_dot_json
+            .chatgpt_entries
+            .iter_mut()
+            .find(|entry| entry.id == id)
+        {
+            entry.name = name;
+            storage.save(&auth_dot_json)?;
+            self.reload();
+            return Ok(());
+        }
+
+        if let Some(entry) = auth_dot_json
+            .api_keys
+            .iter_mut()
+            .find(|entry| entry.id == id)
+        {
+            entry.name = name;
+            storage.save(&auth_dot_json)?;
+            self.reload();
+            return Ok(());
+        }
+
+        Err(std::io::Error::other(format!(
+            "Credential id {id} does not exist"
+        )))
+    }
+
+    pub fn logout_credential_by_id(&self, id: u32) -> std::io::Result<bool> {
+        let storage =
+            create_auth_storage(self.codex_home.clone(), self.auth_credentials_store_mode);
+        let Some(mut auth_dot_json) = load_auth_dot_json_migrated(&storage)? else {
+            return Ok(false);
+        };
+
+        let before = auth_dot_json.chatgpt_entries.len() + auth_dot_json.api_keys.len();
+
+        auth_dot_json.chatgpt_entries.retain(|entry| entry.id != id);
+        auth_dot_json.api_keys.retain(|entry| entry.id != id);
+
+        let after = auth_dot_json.chatgpt_entries.len() + auth_dot_json.api_keys.len();
+        if before == after {
+            return Err(std::io::Error::other(format!(
+                "Credential id {id} does not exist"
+            )));
+        }
+
+        renumber_credentials(&mut auth_dot_json);
+
+        if auth_dot_json.chatgpt_entries.is_empty()
+            && auth_dot_json.api_keys.is_empty()
+            && auth_dot_json.tokens.is_none()
+            && auth_dot_json.openai_api_key.is_none()
+        {
+            storage.delete()?;
+        } else {
+            storage.save(&auth_dot_json)?;
+        }
+
+        self.reload();
+        Ok(true)
+    }
+
+    pub fn logout_all_credentials(&self) -> std::io::Result<bool> {
+        let storage =
+            create_auth_storage(self.codex_home.clone(), self.auth_credentials_store_mode);
+        let removed = storage.delete()?;
+        self.reload();
+        Ok(removed)
+    }
+}
+
+fn renumber_credentials(auth_dot_json: &mut AuthDotJson) {
+    #[derive(Clone)]
+    enum Entry {
+        ChatGpt(ChatGptAuthEntry),
+        ApiKey(crate::auth::storage::ApiKeyAuthEntry),
+    }
+
+    let mut all: Vec<Entry> = auth_dot_json
+        .chatgpt_entries
+        .drain(..)
+        .map(Entry::ChatGpt)
+        .chain(auth_dot_json.api_keys.drain(..).map(Entry::ApiKey))
+        .collect();
+    all.sort_by_key(|entry| match entry {
+        Entry::ChatGpt(inner) => inner.id,
+        Entry::ApiKey(inner) => inner.id,
+    });
+
+    for (idx, entry) in all.iter_mut().enumerate() {
+        let id = (idx as u32).saturating_add(1);
+        match entry {
+            Entry::ChatGpt(inner) => inner.id = id,
+            Entry::ApiKey(inner) => inner.id = id,
+        }
+    }
+
+    for entry in all {
+        match entry {
+            Entry::ChatGpt(inner) => auth_dot_json.chatgpt_entries.push(inner),
+            Entry::ApiKey(inner) => auth_dot_json.api_keys.push(inner),
+        }
     }
 }

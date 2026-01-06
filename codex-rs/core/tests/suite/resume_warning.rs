@@ -1,9 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use codex_core::AuthManager;
-use codex_core::CodexAuth;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
+use codex_core::auth::ApiKeyAuth;
+use codex_core::auth::Auth;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::InitialHistory;
 use codex_core::protocol::ResumedHistory;
@@ -57,10 +58,12 @@ async fn emits_warning_when_resumed_model_differs() {
     let initial_history = resume_history(&config, "previous-model", &rollout_path);
 
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("test"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("test".to_string()),
+        },
         config.model_provider.clone(),
     );
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
+    let auth_manager = AuthManager::from_api_key_for_testing("test");
 
     // Act: resume the conversation.
     let NewConversation { conversation, .. } = conversation_manager

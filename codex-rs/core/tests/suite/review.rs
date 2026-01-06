@@ -1,10 +1,11 @@
-use codex_core::CodexAuth;
 use codex_core::CodexConversation;
 use codex_core::ContentItem;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
 use codex_core::REVIEW_PROMPT;
 use codex_core::ResponseItem;
+use codex_core::auth::ApiKeyAuth;
+use codex_core::auth::Auth;
 use codex_core::built_in_model_providers;
 use codex_core::config::Config;
 use codex_core::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
@@ -843,7 +844,9 @@ where
     config.model_provider = model_provider;
     mutator(&mut config);
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("Test API Key"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("Test API Key".to_string()),
+        },
         config.model_provider.clone(),
     );
     conversation_manager
@@ -872,11 +875,12 @@ where
     config.model_provider = model_provider;
     mutator(&mut config);
     let conversation_manager = ConversationManager::with_models_provider(
-        CodexAuth::from_api_key("Test API Key"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("Test API Key".to_string()),
+        },
         config.model_provider.clone(),
     );
-    let auth_manager =
-        codex_core::AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let auth_manager = codex_core::AuthManager::from_api_key_for_testing("Test API Key");
     conversation_manager
         .resume_conversation_from_rollout(config, resume_path, auth_manager)
         .await

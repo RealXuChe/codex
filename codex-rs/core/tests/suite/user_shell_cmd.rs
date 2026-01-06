@@ -1,6 +1,8 @@
 use anyhow::Context;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
+use codex_core::auth::ApiKeyAuth;
+use codex_core::auth::Auth;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExecCommandSource;
@@ -43,7 +45,9 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
     config.cwd = cwd.path().to_path_buf();
 
     let conversation_manager = ConversationManager::with_models_provider(
-        codex_core::CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let NewConversation {
@@ -102,7 +106,9 @@ async fn user_shell_cmd_can_be_interrupted() {
     let codex_home = TempDir::new().unwrap();
     let config = load_default_config_for_test(&codex_home).await;
     let conversation_manager = ConversationManager::with_models_provider(
-        codex_core::CodexAuth::from_api_key("dummy"),
+        Auth::ApiKey {
+            handle: ApiKeyAuth::new("dummy".to_string()),
+        },
         config.model_provider.clone(),
     );
     let NewConversation {

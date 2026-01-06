@@ -7,6 +7,7 @@ use codex_core::CodexAuth;
 use codex_core::CodexConversation;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
+use codex_core::auth::Auth;
 use codex_core::built_in_model_providers;
 use codex_core::config::Config;
 use codex_core::features::Feature;
@@ -426,7 +427,9 @@ async fn build_remote_models_harness<F>(
 where
     F: FnOnce(&mut Config),
 {
-    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let auth = Auth::ChatGpt {
+        handle: CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    };
     let home = Arc::new(TempDir::new()?);
     let cwd = Arc::new(TempDir::new()?);
 

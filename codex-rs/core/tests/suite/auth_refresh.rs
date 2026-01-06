@@ -196,8 +196,14 @@ impl RefreshTokenTestContext {
         let endpoint = format!("{}/oauth/token", server.uri());
         let env_guard = EnvGuard::set(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, endpoint);
 
-        let auth = CodexAuth::from_auth_storage(codex_home.path(), AuthCredentialsStoreMode::File)?
-            .context("auth should load from storage")?;
+        let auth = codex_core::auth::load_auth_from_storage(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+        )?
+        .context("auth should load from storage")?;
+        let codex_core::auth::Auth::ChatGpt { handle: auth } = auth else {
+            anyhow::bail!("expected ChatGPT auth");
+        };
 
         Ok(Self {
             codex_home,

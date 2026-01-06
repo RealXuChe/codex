@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use codex_app_server_protocol::AuthMode;
 use codex_core::AuthManager;
-use codex_core::CodexAuth;
 use codex_core::ContentItem;
 use codex_core::ModelClient;
 use codex_core::ModelProviderInfo;
@@ -252,8 +251,7 @@ async fn responses_respects_model_family_overrides_from_config() {
     let config = Arc::new(config);
 
     let conversation_id = ConversationId::new();
-    let auth_mode =
-        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key")).get_auth_mode();
+    let auth_mode = AuthManager::from_api_key_for_testing("Test API Key").get_auth_mode();
     let session_source =
         SessionSource::SubAgent(SubAgentSource::Other("override-check".to_string()));
     let model_family = ModelsManager::construct_model_family_offline(model.as_str(), &config);
