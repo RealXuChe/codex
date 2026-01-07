@@ -51,7 +51,7 @@ if [ "$channel" = "nightly" ]; then
 else
   releases_json="$(fetch_release_json "${api_base}/releases?per_page=100")"
   release_json="$(
-    printf '%s' "$releases_json" | python3 - <<'PY'
+    printf '%s' "$releases_json" | python3 -c "$(cat <<'PY'
 import json
 import re
 import sys
@@ -69,11 +69,12 @@ else:
     sys.stderr.write("No alpha release found (tag_name matching fork-v*-alpha.*)\n")
     sys.exit(1)
 PY
+    )"
   )"
 fi
 
 asset_url="$(
-  printf '%s' "$release_json" | python3 - <<'PY'
+  printf '%s' "$release_json" | python3 -c "$(cat <<'PY'
 import json
 import sys
 
@@ -96,6 +97,7 @@ if url is None:
 
 sys.stdout.write(url)
 PY
+  )"
 )"
 
 tmp="${dest}.tmp.$$"
@@ -114,9 +116,9 @@ case ":${PATH}:" in
   *)
     echo ""
     echo "Note: ~/.local/bin is not currently on PATH."
-    echo "To make it available automatically on startup, you can run:"
+    echo "To make it available automatically on startup, add this to your shell rc file (~/.profile, ~/.bashrc, or ~/.zshrc):"
     echo ""
-    echo "  sh -c 'rc=\"$HOME/.profile\"; case \"$SHELL\" in */bash) rc=\"$HOME/.bashrc\" ;; */zsh) rc=\"$HOME/.zshrc\" ;; esac; printf \"\\n# Add ~/.local/bin to PATH (Codex)\\nexport PATH=\\\"$HOME/.local/bin:\\$PATH\\\"\\n\" >> \"$rc\"; echo \"Updated $rc\"'"
+    echo "  export PATH=\"$HOME/.local/bin:\$PATH\""
     echo ""
     echo "Then restart your shell (or open a new terminal)."
     ;;
