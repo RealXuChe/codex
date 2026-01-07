@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-bytes = { workspace = true }
 codex-client = { workspace = true }
 codex-protocol = { workspace = true }
 futures = { workspace = true }
@@ -23,6 +22,7 @@ tokio-util = { workspace = true, features = ["codec"] }
 [dev-dependencies]
 anyhow = { workspace = true }
 assert_matches = { workspace = true }
+bytes = { workspace = true }
 pretty_assertions = { workspace = true }
 tokio-test = { workspace = true }
 wiremock = { workspace = true }

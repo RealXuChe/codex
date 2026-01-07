@@ -991,17 +991,14 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
  "ctor 0.5.0",
- "libc",
  "owo-colors",
  "predicates",
  "pretty_assertions",
- "regex-lite",
  "serde_json",
  "supports-color",
  "tempfile",
  "tokio",
  "toml",
- "tracing",
 ]
 
 [[package]]
@@ -1300,7 +1297,6 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64",
- "chrono",
  "codex-app-server-protocol",
  "codex-core",
  "core_test_support",
